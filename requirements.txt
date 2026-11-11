@@ -1,0 +1,4 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+mutagen>=1.47
+httpx>=0.27
