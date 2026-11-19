@@ -15,11 +15,6 @@ class AudioMeta:
     bit_depth: int | None = None
 
 
-# Preview transcode cap. The original file is not copied; this only limits
-# the in-memory AIFF → WAV conversion used for browser playback.
-MAX_PREVIEW_BYTES = 80 * 1024 * 1024
-
-
 def probe(path: Path) -> AudioMeta:
     ext = path.suffix.lower()
     try:
@@ -61,54 +56,6 @@ def repitch_wav(data: bytes, semitones: int) -> bytes:
             return bytes(buf)
         pos += 8 + size + (size & 1)
     raise ValueError("WAV is missing fmt")
-
-
-def aiff_to_wav_bytes(path: Path) -> bytes:
-    """Uncompressed AIFF/AIFF-C PCM as a 16-bit WAV byte string.
-
-    Used so the browser can preview Ableton's .aif samples. The source file
-    is only read.
-    """
-    size = path.stat().st_size
-    if size > MAX_PREVIEW_BYTES:
-        raise ValueError("file is too large to preview")
-    data = path.read_bytes()
-    if len(data) < 12 or data[0:4] != b"FORM" or data[8:12] not in {b"AIFF", b"AIFC"}:
-        raise ValueError("not an AIFF file")
-    is_aifc = data[8:12] == b"AIFC"
-    comm = ssnd = None
-    pos = 12
-    while pos + 8 <= len(data):
-        cid = data[pos : pos + 4]
-        chunk = int.from_bytes(data[pos + 4 : pos + 8], "big")
-        start = pos + 8
-        body = data[start : start + chunk]
-        if cid == b"COMM":
-            comm = body
-        elif cid == b"SSND":
-            ssnd = body
-        pos = start + chunk + (chunk & 1)
-    if not comm or ssnd is None or len(comm) < 18:
-        raise ValueError("AIFF is missing COMM or SSND")
-    channels = int.from_bytes(comm[0:2], "big")
-    frames = int.from_bytes(comm[2:6], "big")
-    bits = int.from_bytes(comm[6:8], "big")
-    rate = int(round(_extended80(comm[8:18])))
-    comp = b"NONE"
-    if is_aifc and len(comm) >= 22:
-        comp = comm[18:22]
-    if comp not in {b"NONE", b"twos", b"raw ", b"sowt"}:
-        raise ValueError("compressed AIFF can't be previewed")
-    if channels < 1 or rate < 1 or bits not in {8, 16, 24, 32}:
-        raise ValueError("unsupported AIFF PCM layout")
-    offset = int.from_bytes(ssnd[0:4], "big") if len(ssnd) >= 8 else 0
-    pcm = ssnd[8 + offset :]
-    width = bits // 8
-    need = frames * channels * width
-    pcm = pcm[:need]
-    little = comp == b"sowt"
-    pcm16 = _to_s16le(pcm, width, little=little)
-    return _wav_bytes(pcm16, channels, rate, 16)
 
 
 def _probe_wav(path: Path) -> AudioMeta | None:
@@ -211,45 +158,3 @@ def _extended80(raw: bytes) -> float:
     # The integer bit is explicit in the top bit of the fraction.
     value = (frac / float(1 << 63)) * (2.0 ** (exp - 16383))
     return -value if sign else value
-
-
-def _to_s16le(pcm: bytes, width: int, *, little: bool) -> bytes:
-    if width == 1:
-        out = bytearray(len(pcm) * 2)
-        for i, byte in enumerate(pcm):
-            sample = byte - 128 if not little else (byte if byte < 128 else byte - 256)
-            struct.pack_into("<h", out, i * 2, max(-32768, min(32767, sample << 8)))
-        return bytes(out)
-    count = len(pcm) // width
-    out = bytearray(count * 2)
-    for i in range(count):
-        chunk = pcm[i * width : (i + 1) * width]
-        if not little:
-            chunk = chunk[::-1]
-        if width >= 2:
-            sample = int.from_bytes(chunk[-2:], "little", signed=True)
-        else:
-            sample = 0
-        struct.pack_into("<h", out, i * 2, sample)
-    return bytes(out)
-
-
-def _wav_bytes(pcm: bytes, channels: int, rate: int, bits: int) -> bytes:
-    width = bits // 8
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36 + len(pcm),
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        channels,
-        rate,
-        rate * channels * width,
-        channels * width,
-        bits,
-        b"data",
-        len(pcm),
-    )
-    return header + pcm

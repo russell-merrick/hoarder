@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -12,11 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from hoarder.db import backfill_roles, connect, counts_by_root, get_sample, init_db, query_samples, row_dict
 from hoarder.genres import decode as decode_genres
-from hoarder.livebpm import parse_bpm, project_status
-from hoarder.probe import aiff_to_wav_bytes
+from hoarder.livebpm import project_status
 from hoarder.roles import decode as decode_roles
-from hoarder.stretch import match_sample
-from hoarder.roots import DEFAULT_ROOTS, Root, is_under_root
+from hoarder.stretch import browser_wav, match_sample
+from hoarder.roots import Root, is_under_root, load_roots
 from hoarder.scan import start_scan, state
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -43,7 +43,7 @@ def create_app(
     scan_on_start: bool = True,
 ) -> FastAPI:
     database = Path(db_path) if db_path is not None else DEFAULT_DB
-    library_roots = tuple(roots) if roots is not None else DEFAULT_ROOTS
+    library_roots = tuple(roots) if roots is not None else load_roots()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -114,6 +114,9 @@ def create_app(
         unique: bool = False,
         min_sec: float | None = None,
         max_sec: float | None = None,
+        min_bpm: float | None = None,
+        max_bpm: float | None = None,
+        key: str = "",
         sort: str = "name",
         direction: str = "asc",
         limit: int = Query(80, ge=1, le=1000),
@@ -123,6 +126,10 @@ def create_app(
             raise HTTPException(400, "min_sec must be >= 0")
         if max_sec is not None and max_sec < 0:
             raise HTTPException(400, "max_sec must be >= 0")
+        if min_bpm is not None and min_bpm < 0:
+            raise HTTPException(400, "min_bpm must be >= 0")
+        if max_bpm is not None and max_bpm < 0:
+            raise HTTPException(400, "max_bpm must be >= 0")
         if direction not in {"asc", "desc"}:
             direction = "asc"
         if min_sec is not None and max_sec is not None and min_sec > max_sec:
@@ -137,6 +144,9 @@ def create_app(
                 kind=kind,
                 min_sec=min_sec,
                 max_sec=max_sec,
+                min_bpm=min_bpm,
+                max_bpm=max_bpm,
+                key=key,
                 roles=roles,
                 genres=genres,
                 exclude_genres=exclude_genres,
@@ -154,7 +164,6 @@ def create_app(
             item["roles"] = decode_roles(item.get("roles"))
             item["genres"] = decode_genres(item.get("genres"))
             item["key"] = item.pop("musical_key", None) or ""
-            item["bpm"] = parse_bpm(item.get("name") or "")
             items.append(item)
         return {
             "total": total,
@@ -174,8 +183,8 @@ def create_app(
         semitones: int = Query(0, ge=-12, le=12),
         bpm: float | None = Query(None, ge=40, le=250),
     ):
-        _row, path = _load(request, sample_id)
-        matched = _matched(path, semitones, bpm)
+        row, path = _load(request, sample_id)
+        matched = _matched(path, semitones, bpm, row["bpm"])
         if matched is None:
             return FileResponse(
                 path,
@@ -183,11 +192,11 @@ def create_app(
                 filename=path.name,
                 content_disposition_type="inline",
             )
-        filename = _matched_name(path, semitones, bpm)
+        filename = _matched_name(path, semitones, bpm, row["bpm"])
         return Response(
             content=matched,
             media_type="audio/wav",
-            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+            headers={"Content-Disposition": _disposition(filename)},
         )
 
     @app.post("/api/samples/{sample_id}/reveal")
@@ -205,8 +214,8 @@ def create_app(
         semitones: int = Query(0, ge=-12, le=12),
         bpm: float | None = Query(None, ge=40, le=250),
     ):
-        _row, path = _load(request, sample_id)
-        matched = _matched(path, semitones, bpm)
+        row, path = _load(request, sample_id)
+        matched = _matched(path, semitones, bpm, row["bpm"])
         if matched is not None:
             return Response(
                 content=matched,
@@ -216,7 +225,7 @@ def create_app(
         ext = path.suffix.lower()
         if ext in {".aif", ".aiff"}:
             try:
-                wav = aiff_to_wav_bytes(path)
+                wav = browser_wav(path)
             except ValueError as exc:
                 raise HTTPException(415, str(exc)) from exc
             return Response(
@@ -235,20 +244,29 @@ def create_app(
     return app
 
 
-def _matched(path: Path, semitones: int, bpm: float | None) -> bytes | None:
+def _matched(path: Path, semitones: int, bpm: float | None, sample_bpm: float | None) -> bytes | None:
     try:
-        return match_sample(path, semitones, bpm)
+        return match_sample(path, semitones, bpm, sample_bpm)
     except ValueError as exc:
         raise HTTPException(415, str(exc)) from exc
 
 
-def _matched_name(path: Path, semitones: int, bpm: float | None) -> str:
+def _matched_name(path: Path, semitones: int, bpm: float | None, sample_bpm: float | None) -> str:
     bits = [path.stem]
     if semitones:
         bits.append(f"{'+' if semitones > 0 else ''}{semitones}")
-    if bpm and parse_bpm(path.name):
+    if bpm and sample_bpm:
         bits.append(f"{bpm:g}bpm")
     return f"{' '.join(bits)}.wav"
+
+
+def _disposition(filename: str) -> str:
+    """Content-Disposition for any filename. A plain header can't carry "–" or
+    non-Latin text, so those go in the UTF-8 form, as FileResponse does."""
+    encoded = quote(filename)
+    if encoded == filename:
+        return f'inline; filename="{filename}"'
+    return f"inline; filename*=utf-8''{encoded}"
 
 
 def _load(request: Request, sample_id: int) -> tuple[dict, Path]:

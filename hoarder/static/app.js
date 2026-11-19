@@ -14,6 +14,8 @@ const PAGE = 1000;
 const LEN_MAX = 1000;
 const SEC_HI = 120;
 const ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const BPM_MIN = 40;
+const BPM_MAX = 250;
 const FLAT = { Db: "C#", Eb: "D#", Gb: "F#", Ab: "G#", Bb: "A#" };
 
 const ROLE_GROUPS = [
@@ -21,13 +23,23 @@ const ROLE_GROUPS = [
     ["kick", "Kick"],
     ["hat", "Hat"],
     ["snare", "Snare"],
+    ["clap", "Clap"],
     ["shaker", "Shaker"],
+    ["tom", "Tom"],
+    ["cymbal", "Cymbal"],
+    ["perc", "Perc"],
   ],
   [
     ["bass", "Bass"],
+    ["808", "808"],
     ["lead", "Lead"],
+    ["pluck", "Pluck"],
+    ["pad", "Pad"],
+    ["stab", "Stab"],
     ["arp", "Arp"],
     ["synth", "Synth"],
+    ["keys", "Keys"],
+    ["guitar", "Guitar"],
   ],
   [
     ["vocals", "Vocals"],
@@ -94,10 +106,18 @@ function rootName(key) {
   return match[1] + (match[2] || "");
 }
 
+function isMinor(key) {
+  return /m$/.test(key || "");
+}
+
 function semitonesBetween(from, to) {
-  const start = ROOTS.indexOf(rootName(from));
+  let start = ROOTS.indexOf(rootName(from));
   const end = ROOTS.indexOf(rootName(to));
   if (start < 0 || end < 0) return 0;
+  // Relative keys share their notes: an A minor loop in C major does not move.
+  // A key with no mode counts as major.
+  if (isMinor(from) && !isMinor(to)) start += 3;
+  else if (isMinor(to) && !isMinor(from)) start -= 3;
   let delta = (end - start) % 12;
   if (delta < 0) delta += 12;
   if (delta > 6) delta -= 12;
@@ -106,6 +126,26 @@ function semitonesBetween(from, to) {
 
 function targetKey() {
   return $("target-key").value;
+}
+
+function fillKeys(select) {
+  for (const [label, suffix] of [["Major", ""], ["Minor", "m"]]) {
+    const group = document.createElement("optgroup");
+    group.label = label;
+    for (const root of ROOTS) {
+      const option = document.createElement("option");
+      option.value = `${root}${suffix}`;
+      option.textContent = `${root}${suffix}`;
+      group.append(option);
+    }
+    select.append(group);
+  }
+}
+
+function bpmValue(id) {
+  const value = Number($(id).value);
+  if (!$(id).value.trim() || !Number.isFinite(value)) return null;
+  return Math.min(BPM_MAX, Math.max(BPM_MIN, value));
 }
 
 function shiftOf(sample) {
@@ -208,6 +248,14 @@ function params() {
   const bounds = lengthBounds();
   if (bounds.min != null) query.set("min_sec", String(bounds.min));
   if (bounds.max != null) query.set("max_sec", String(bounds.max));
+  const minBpm = bpmValue("bpm-min");
+  const maxBpm = bpmValue("bpm-max");
+  if (minBpm != null) query.set("min_bpm", String(minBpm));
+  if (maxBpm != null) query.set("max_bpm", String(maxBpm));
+  if ($("key-filter").value) query.set("key", $("key-filter").value);
+  const [sort, direction] = $("sort").value.split(":");
+  query.set("sort", sort);
+  query.set("direction", direction);
   if ($("hide-dupes").checked) query.set("unique", "1");
   query.set("limit", String(PAGE));
   query.set("offset", String(offset));
@@ -450,6 +498,10 @@ function renderHit(sample) {
   fillMeta(meta, sample);
   body.append(name, meta);
 
+  const bpm = document.createElement("span");
+  bpm.className = sample.bpm ? "key" : "key empty";
+  bpm.textContent = sample.bpm ? String(Math.round(sample.bpm)) : "—";
+
   const key = document.createElement("span");
   key.className = sample.key ? "key" : "key empty";
   key.textContent = sample.key || "—";
@@ -458,7 +510,7 @@ function renderHit(sample) {
   dur.className = "dur";
   dur.textContent = fmtDur(sample.duration);
 
-  li.append(play, body, key, dur);
+  li.append(play, body, bpm, key, dur);
   li.addEventListener("click", () => toggle(sample));
   li.addEventListener("contextmenu", (event) => {
     event.preventDefault();
@@ -813,6 +865,15 @@ function bind() {
   renderRoles();
   renderGenres();
   $("q").addEventListener("input", () => scheduleList());
+  fillKeys($("target-key"));
+  fillKeys($("key-filter"));
+  for (const id of ["bpm-min", "bpm-max"]) $(id).addEventListener("input", () => scheduleList());
+  for (const id of ["key-filter", "sort"]) {
+    $(id).addEventListener("change", () => {
+      offset = 0;
+      refreshList();
+    });
+  }
 
   $("target-key").addEventListener("change", () => {
     if (!current) return;

@@ -1,13 +1,17 @@
 """Sample roots Hoarder is allowed to read.
 
 Projects are not a root. Hoarder indexes these folders in place and never
-moves, renames, or deletes the audio files.
+moves, renames, or deletes the audio files. The list lives in roots.json,
+which is not in the repo; roots.example.json shows the format.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
+
+ROOTS_FILE = Path(__file__).resolve().parent.parent / "roots.json"
 
 
 @dataclass(frozen=True)
@@ -17,15 +21,12 @@ class Root:
     path: Path
 
 
-DEFAULT_ROOTS: tuple[Root, ...] = (
-    Root("curated", "Samples", Path(r"G:\Other computers\Snowy\music\samples")),
-    Root("downloads", "downloads", Path(r"C:\Users\russe\Documents\downloads\Samples")),
-    Root(
-        "user_library",
-        "User Library",
-        Path(r"G:\Other computers\Snowy\User Library\Samples"),
-    ),
-)
+def load_roots(path: Path = ROOTS_FILE) -> tuple[Root, ...]:
+    """Library folders from roots.json. No file means no folders."""
+    if not path.is_file():
+        return ()
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(Root(str(entry["id"]), str(entry["label"]), Path(entry["path"])) for entry in entries)
 
 AUDIO_EXT = frozenset({
     ".wav",

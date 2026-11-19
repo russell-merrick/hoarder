@@ -8,7 +8,11 @@ import re
 import subprocess
 from pathlib import Path
 
+from hoarder.roles import haystack
+
 _BPM = re.compile(r"(?i)(?<!\d)(\d{2,3}(?:\.\d+)?)(?=\s*bpm(?:[^a-z]|$))")
+_LOOP = re.compile(r"\bloops?\b")
+_WORDS = re.compile(r"[^A-Za-z0-9]+")
 _LOAD = re.compile(r'Loading document "([^"]+\.als)"', re.IGNORECASE)
 _TEMPO = re.compile(r'<Tempo>.*?<Manual Value="([0-9.]+)"', re.DOTALL)
 
@@ -16,14 +20,25 @@ _status_cache: tuple[tuple, dict] | None = None
 _bpm_cache: dict[str, tuple[float, float | None]] = {}
 
 
-def parse_bpm(name: str) -> float | None:
+def parse_bpm(name: str, folder: str = "") -> float | None:
+    """Tempo from a sample name: "125bpm", "125 BPM", or a bare 125 on a loop.
+
+    A bare number only counts on a loop, from 60 to 200, with no leading zero.
+    On a one-shot it is a take number ("Snare_140"), and 099 or 808 never is a tempo.
+    """
     match = _BPM.search(name or "")
-    if not match:
+    if match:
+        value = float(match.group(1))
+        if value < 40 or value > 250:
+            return None
+        return value
+    if not _LOOP.search(haystack(name or "", folder)):
         return None
-    value = float(match.group(1))
-    if value < 40 or value > 250:
-        return None
-    return value
+    stem = (name or "").rsplit(".", 1)[0]
+    for token in _WORDS.split(stem):
+        if token.isdigit() and not token.startswith("0") and 60 <= int(token) <= 200:
+            return float(token)
+    return None
 
 
 def tempo_ratio(sample_bpm: float, project_bpm: float) -> float:

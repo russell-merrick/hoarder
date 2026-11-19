@@ -12,6 +12,7 @@ from hoarder.db import (
     delete_missing,
     existing_stamp,
     init_db,
+    mark_duplicates,
     upsert_many,
 )
 from hoarder.probe import probe
@@ -85,6 +86,7 @@ def _run(db_path: Path, roots: tuple[Root, ...]) -> None:
                         state.offline.append(root.id)
                     continue
                 _scan_root(conn, root)
+            mark_duplicates(conn)
         finally:
             conn.close()
     except Exception as exc:

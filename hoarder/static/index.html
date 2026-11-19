@@ -10,7 +10,7 @@
       if (theme) document.documentElement.dataset.theme = theme;
     } catch (err) {}
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=13" />
+  <link rel="stylesheet" href="/static/styles.css?v=14" />
 </head>
 <body>
   <div class="app">
@@ -75,21 +75,38 @@
           <span>To key</span>
           <select id="target-key" aria-label="Pitch to key">
             <option value="">Original</option>
-            <option>C</option>
-            <option>C#</option>
-            <option>D</option>
-            <option>D#</option>
-            <option>E</option>
-            <option>F</option>
-            <option>F#</option>
-            <option>G</option>
-            <option>G#</option>
-            <option>A</option>
-            <option>A#</option>
-            <option>B</option>
           </select>
         </label>
         <span id="project-bpm" class="project-bpm" hidden></span>
+      </div>
+      <div class="tag-row length">
+        <span class="tag-label">Tempo</span>
+        <label class="field bpm-field">
+          <span>BPM from</span>
+          <input id="bpm-min" type="number" min="40" max="250" step="1" placeholder="any" />
+        </label>
+        <label class="field bpm-field">
+          <span>to</span>
+          <input id="bpm-max" type="number" min="40" max="250" step="1" placeholder="any" />
+        </label>
+        <label class="field key-field">
+          <span>Key</span>
+          <select id="key-filter" aria-label="Only samples in this key">
+            <option value="">Any</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Sort</span>
+          <select id="sort">
+            <option value="name:asc">Name A–Z</option>
+            <option value="name:desc">Name Z–A</option>
+            <option value="bpm:asc">BPM, low first</option>
+            <option value="bpm:desc">BPM, high first</option>
+            <option value="duration:asc">Shortest</option>
+            <option value="duration:desc">Longest</option>
+            <option value="pack:asc">Pack</option>
+          </select>
+        </label>
       </div>
       <p class="hint">Click a genre twice to exclude it. Kick, then Dubstep again, leaves dubstep out. Files stay where they are. Drag a row into Ableton.</p>
     </section>
@@ -126,6 +143,6 @@
     <button type="button" id="open-explorer">Open in Explorer</button>
   </div>
   <audio id="audio" preload="auto"></audio>
-  <script src="/static/app.js?v=15"></script>
+  <script src="/static/app.js?v=16"></script>
 </body>
 </html>

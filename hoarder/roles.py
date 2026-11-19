@@ -12,11 +12,21 @@ ROLE_ORDER: tuple[str, ...] = (
     "kick",
     "hat",
     "snare",
+    "clap",
     "shaker",
+    "tom",
+    "cymbal",
+    "perc",
     "bass",
+    "808",
     "lead",
+    "pluck",
+    "pad",
+    "stab",
     "arp",
     "synth",
+    "keys",
+    "guitar",
     "vocals",
     "chops",
     "fx",
@@ -30,11 +40,21 @@ ROLE_LABELS: dict[str, str] = {
     "kick": "Kick",
     "hat": "Hat",
     "snare": "Snare",
+    "clap": "Clap",
     "shaker": "Shaker",
+    "tom": "Tom",
+    "cymbal": "Cymbal",
+    "perc": "Perc",
     "bass": "Bass",
+    "808": "808",
     "lead": "Lead",
+    "pluck": "Pluck",
+    "pad": "Pad",
+    "stab": "Stab",
     "arp": "Arp",
     "synth": "Synth",
+    "keys": "Keys",
+    "guitar": "Guitar",
     "vocals": "Vocals",
     "chops": "Chops",
     "fx": "FX",
@@ -54,11 +74,27 @@ _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("kick", re.compile(r"\bkicks?\b|\bbd\b|\bbass ?drums?\b")),
     ("hat", re.compile(r"\bhi ?hats?\b|\bhihats?\b|\bhats?\b|\bclosed hats?\b|\bopen hats?\b")),
     ("snare", re.compile(r"\bsnares?\b|\bsnr\b")),
+    ("clap", re.compile(r"\bclaps?\b")),
     ("shaker", re.compile(r"\bshakers?\b")),
+    ("tom", re.compile(r"\btoms?\b")),
+    ("cymbal", re.compile(r"\bcymbals?\b|\bcrash(?:es)?\b|\brides?\b|\bsplash\b")),
+    (
+        "perc",
+        re.compile(
+            r"\bpercs?\b|\bpercussions?\b|\bcongas?\b|\bbongos?\b|\brims?\b|\brimshots?\b"
+            r"|\bcowbells?\b|\btambourines?\b|\btambs?\b"
+        ),
+    ),
     ("bass", _BASS),
+    ("808", re.compile(r"\b808s?\b")),
     ("lead", re.compile(r"\bleads?\b")),
+    ("pluck", re.compile(r"\bplucks?\b")),
+    ("pad", re.compile(r"\bpads?\b")),
+    ("stab", re.compile(r"\bstabs?\b")),
     ("arp", re.compile(r"\barps?\b|\barpeggios?\b|\barpeggiators?\b")),
     ("synth", re.compile(r"\bsynths?\b")),
+    ("keys", re.compile(r"\bkeys\b|\bpianos?\b|\brhodes\b|\borgans?\b|\bwurli(?:tzer)?s?\b")),
+    ("guitar", re.compile(r"\bguitars?\b|\bgtrs?\b")),
     ("vocals", re.compile(r"\bvocals?\b|\bvox\b|\bvoices?\b|\bchoirs?\b")),
     ("chops", re.compile(r"\bchops?\b")),
     ("fx", re.compile(r"\bfx\b|\bsfx\b|\bimpacts?\b|\bwhooshes?\b")),
@@ -101,6 +137,18 @@ def classify(name: str, folder: str) -> str:
         if pattern.search(hay):
             found.append(role)
     return encode(found)
+
+
+_DRUM_ROLES = frozenset({"kick", "hat", "snare", "clap", "shaker", "tom", "cymbal", "perc"})
+_DRUM_WORDS = re.compile(r"\bdrums?\b|\btops\b|\bbreaks?\b|\bbreakbeats?\b")
+
+
+def is_drum(name: str, folder: str) -> bool:
+    """True for drum hits and drum loops. "Drum & Bass" in a pack name is a genre."""
+    text = _DRUM_AND_BASS.sub(" ", haystack(name, folder))
+    if _DRUM_WORDS.search(text):
+        return True
+    return any(pattern.search(text) for role, pattern in _RULES if role in _DRUM_ROLES)
 
 
 def encode(roles: list[str] | tuple[str, ...]) -> str:

@@ -287,6 +287,10 @@ html[data-theme="rainbow"] body {
 
 .key-field { min-width: 96px; }
 
+.bpm-field { min-width: 0; }
+
+.bpm-field input { width: 76px; }
+
 .project-bpm {
   font-family: var(--mono);
   font-size: 12px;
@@ -625,7 +629,7 @@ html[data-theme="rainbow"] body {
 
 .hit {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 46px auto;
+  grid-template-columns: 32px minmax(0, 1fr) 34px 46px auto;
   gap: 6px 10px;
   align-items: center;
   padding: 8px 10px;

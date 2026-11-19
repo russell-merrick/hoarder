@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+from hoarder import genres as genre_rules
+from hoarder import keys as key_rules
+from hoarder import livebpm as bpm_rules
+from hoarder import roles as role_rules
 from hoarder.genres import classify as classify_genres
 from hoarder.genres import known_genres
-from hoarder.keys import parse_key
+from hoarder.keys import parse_key, spellings
+from hoarder.livebpm import parse_bpm
 from hoarder.roles import classify as classify_roles
 from hoarder.roles import known_roles
 
@@ -29,12 +35,24 @@ CREATE TABLE IF NOT EXISTS samples (
   bit_depth INTEGER,
   roles TEXT NOT NULL DEFAULT '',
   genres TEXT NOT NULL DEFAULT '',
-  musical_key TEXT NOT NULL DEFAULT ''
+  musical_key TEXT NOT NULL DEFAULT '',
+  bpm REAL,
+  dupe INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_samples_root ON samples(root);
 CREATE INDEX IF NOT EXISTS idx_samples_pack ON samples(pack);
 CREATE INDEX IF NOT EXISTS idx_samples_duration ON samples(duration);
 CREATE INDEX IF NOT EXISTS idx_samples_name ON samples(name);
+"""
+
+# Indexes on columns that older catalogs gain in init_db.
+LATE_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_samples_bpm ON samples(bpm);
+CREATE INDEX IF NOT EXISTS idx_samples_key ON samples(musical_key);
 """
 
 SORTS = {
@@ -46,6 +64,8 @@ SORTS = {
     ("pack", "desc"): "pack COLLATE NOCASE DESC, name COLLATE NOCASE ASC",
     ("size", "asc"): "size ASC",
     ("size", "desc"): "size DESC",
+    ("bpm", "asc"): "bpm IS NULL, bpm ASC, name COLLATE NOCASE ASC",
+    ("bpm", "desc"): "bpm IS NULL, bpm DESC, name COLLATE NOCASE ASC",
 }
 
 TYPE_EXTS = {
@@ -76,32 +96,93 @@ def init_db(db_path: Path) -> None:
             conn.execute("ALTER TABLE samples ADD COLUMN genres TEXT NOT NULL DEFAULT ''")
         if "musical_key" not in cols:
             conn.execute("ALTER TABLE samples ADD COLUMN musical_key TEXT NOT NULL DEFAULT ''")
+        if "bpm" not in cols:
+            conn.execute("ALTER TABLE samples ADD COLUMN bpm REAL")
+        if "dupe" not in cols:
+            conn.execute("ALTER TABLE samples ADD COLUMN dupe INTEGER NOT NULL DEFAULT 0")
+        conn.executescript(LATE_INDEXES)
         conn.commit()
     finally:
         conn.close()
 
 
 def backfill_roles(db_path: Path) -> None:
-    """Recompute sample tags and genre tags. Scan skips unchanged files, so this
-    is what gets a rule change onto rows that are already in the catalog."""
+    """Recompute tags, key, tempo and duplicates when the rules have changed.
+
+    Scan skips unchanged files, so this is what gets a rule change onto rows
+    that are already in the catalog. With no change it returns at once.
+    """
+    stamp = _rules_stamp()
     conn = connect(db_path)
     try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'rules'").fetchone()
+        if row is not None and row["value"] == stamp:
+            return
         rows = conn.execute("SELECT id, name, pack, folder FROM samples").fetchall()
         conn.executemany(
-            "UPDATE samples SET roles = ?, genres = ?, musical_key = ? WHERE id = ?",
+            "UPDATE samples SET roles = ?, genres = ?, musical_key = ?, bpm = ? WHERE id = ?",
             [
                 (
-                    classify_roles(row["name"], row["folder"]),
-                    classify_genres(row["pack"], row["folder"]),
-                    parse_key(row["name"], row["folder"]),
+                    *_derived(row["name"], row["pack"], row["folder"]).values(),
                     row["id"],
                 )
                 for row in rows
             ],
         )
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('rules', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (stamp,),
+        )
         conn.commit()
+        mark_duplicates(conn)
     finally:
         conn.close()
+
+
+def _rules_stamp() -> str:
+    """Changes whenever a tag, key or tempo rule changes."""
+    digest = hashlib.sha1()
+    for module in (role_rules, genre_rules, key_rules, bpm_rules):
+        digest.update(Path(module.__file__).read_bytes())
+    return digest.hexdigest()
+
+
+def _derived(name: str, pack: str, folder: str) -> dict[str, Any]:
+    """Columns worked out from the name and folder. Order matches backfill's UPDATE."""
+    return {
+        "roles": classify_roles(name, folder),
+        "genres": classify_genres(pack, folder),
+        "musical_key": parse_key(name, folder),
+        "bpm": parse_bpm(name, folder),
+    }
+
+
+def mark_duplicates(conn: sqlite3.Connection) -> None:
+    """Flag every copy but one of a file saved twice: same name and size.
+
+    The kept copy is the organized one. "Hide duplicates" shows only kept copies.
+    """
+    conn.execute("UPDATE samples SET dupe = 0 WHERE dupe != 0")
+    conn.execute(
+        """
+        UPDATE samples SET dupe = 1 WHERE id IN (
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (
+              PARTITION BY name COLLATE NOCASE, size
+              ORDER BY
+                CASE WHEN root = 'user_library' AND folder = 'downloads' THEN 1 ELSE 0 END,
+                CASE root WHEN 'downloads' THEN 0 WHEN 'curated' THEN 1 ELSE 2 END,
+                length(folder) DESC,
+                id
+            ) AS rn
+            FROM samples
+          )
+          WHERE rn > 1
+        )
+        """
+    )
+    conn.commit()
 
 
 def upsert_many(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
@@ -110,21 +191,19 @@ def upsert_many(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
     prepared = []
     for row in rows:
         item = dict(row)
-        if item.get("roles") is None:
-            item["roles"] = classify_roles(str(item.get("name") or ""), str(item.get("folder") or ""))
-        if item.get("genres") is None:
-            item["genres"] = classify_genres(str(item.get("pack") or ""), str(item.get("folder") or ""))
-        if item.get("musical_key") is None:
-            item["musical_key"] = parse_key(str(item.get("name") or ""), str(item.get("folder") or ""))
+        derived = _derived(str(item.get("name") or ""), str(item.get("pack") or ""), str(item.get("folder") or ""))
+        for column, value in derived.items():
+            if item.get(column) is None:
+                item[column] = value
         prepared.append(item)
     conn.executemany(
         """
         INSERT INTO samples (
           path, name, ext, root, pack, folder, size, mtime,
-          duration, sample_rate, channels, bit_depth, roles, genres, musical_key
+          duration, sample_rate, channels, bit_depth, roles, genres, musical_key, bpm
         ) VALUES (
           :path, :name, :ext, :root, :pack, :folder, :size, :mtime,
-          :duration, :sample_rate, :channels, :bit_depth, :roles, :genres, :musical_key
+          :duration, :sample_rate, :channels, :bit_depth, :roles, :genres, :musical_key, :bpm
         )
         ON CONFLICT(path) DO UPDATE SET
           name=excluded.name,
@@ -140,7 +219,8 @@ def upsert_many(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
           bit_depth=excluded.bit_depth,
           roles=excluded.roles,
           genres=excluded.genres,
-          musical_key=excluded.musical_key
+          musical_key=excluded.musical_key,
+          bpm=excluded.bpm
         """,
         prepared,
     )
@@ -188,6 +268,9 @@ def query_samples(
     kind: str = "",
     min_sec: float | None = None,
     max_sec: float | None = None,
+    min_bpm: float | None = None,
+    max_bpm: float | None = None,
+    key: str = "",
     roles: str = "",
     genres: str = "",
     exclude_genres: str = "",
@@ -197,39 +280,22 @@ def query_samples(
     limit: int = 80,
     offset: int = 0,
 ) -> tuple[int, list[sqlite3.Row]]:
-    where, params = _where(q, root, pack, kind, min_sec, max_sec, roles, genres, exclude_genres)
-    order = SORTS.get((sort, direction), SORTS[("name", "asc")])
-    source = "samples"
+    where, params = _where(
+        q, root, pack, kind, min_sec, max_sec, roles, genres, exclude_genres, min_bpm, max_bpm, key
+    )
     if unique_names:
-        # Same name and size is the same file saved twice. Keep the organized copy.
-        source = f"""(
-          SELECT id, name, ext, root, pack, folder, path, size, duration,
-                 sample_rate, channels, bit_depth, roles, genres, musical_key
-          FROM (
-            SELECT samples.*, ROW_NUMBER() OVER (
-              PARTITION BY name COLLATE NOCASE, size
-              ORDER BY
-                CASE WHEN root = 'user_library' AND folder = 'downloads' THEN 1 ELSE 0 END,
-                CASE root WHEN 'downloads' THEN 0 WHEN 'curated' THEN 1 ELSE 2 END,
-                length(folder) DESC,
-                id
-            ) AS __rn
-            FROM samples
-            WHERE {where}
-          ) AS ranked
-          WHERE __rn = 1
-        ) AS chosen"""
-    where_sql = "" if unique_names else f"WHERE {where}"
+        where += " AND dupe = 0"
+    order = SORTS.get((sort, direction), SORTS[("name", "asc")])
     total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM {source} {where_sql}",
+        f"SELECT COUNT(*) AS n FROM samples WHERE {where}",
         params,
     ).fetchone()["n"]
     rows = conn.execute(
         f"""
         SELECT id, name, ext, root, pack, folder, path, size, duration,
-               sample_rate, channels, bit_depth, roles, genres, musical_key
-        FROM {source}
-        {where_sql}
+               sample_rate, channels, bit_depth, roles, genres, musical_key, bpm
+        FROM samples
+        WHERE {where}
         ORDER BY {order}
         LIMIT ? OFFSET ?
         """,
@@ -248,16 +314,18 @@ def _where(
     roles: str = "",
     genres: str = "",
     exclude_genres: str = "",
+    min_bpm: float | None = None,
+    max_bpm: float | None = None,
+    key: str = "",
 ) -> tuple[str, list[Any]]:
     clauses = ["1=1"]
     params: list[Any] = []
-    if q.strip():
-        like = _like(q.strip())
-        clauses.append(
-            "(name LIKE ? ESCAPE '\\' OR folder LIKE ? ESCAPE '\\' "
-            "OR pack LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"
-        )
-        params.extend([like, like, like, like])
+    # Every word must appear somewhere in the name, folder or pack, in any order.
+    # The full path is left out: its drive and root folders match every file.
+    for word in q.split():
+        like = _like(word)
+        clauses.append("(name LIKE ? ESCAPE '\\' OR folder LIKE ? ESCAPE '\\' OR pack LIKE ? ESCAPE '\\')")
+        params.extend([like, like, like])
     if root:
         clauses.append("root = ?")
         params.append(root)
@@ -274,6 +342,16 @@ def _where(
     if max_sec is not None:
         clauses.append("duration <= ?")
         params.append(max_sec)
+    if min_bpm is not None:
+        clauses.append("bpm >= ?")
+        params.append(min_bpm)
+    if max_bpm is not None:
+        clauses.append("bpm <= ?")
+        params.append(max_bpm)
+    names = spellings(key)
+    if names:
+        clauses.append(f"musical_key IN ({','.join('?' for _ in names)})")
+        params.extend(names)
     for role in known_roles(roles):
         clauses.append("roles LIKE ?")
         params.append(f"% {role} %")
