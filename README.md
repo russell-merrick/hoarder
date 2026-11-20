@@ -13,7 +13,9 @@ python -m pip install -r requirements.txt
 python -m hoarder
 ```
 
-Or run `run.bat`. Then open http://127.0.0.1:8770
+Or run `run.bat`, then open http://127.0.0.1:8770. The Hoarder shortcut on the desktop starts the server if it is not already running and opens the page in its own window.
+
+On a Mac, double-click `Hoarder.app` in this folder. It starts the server the same way and opens an app window in Microsoft Edge or Google Chrome. The first launch may need a right-click and Open. If macOS says the app is damaged, run `chmod +x Hoarder.app/Contents/MacOS/launcher`.
 
 List your sample folders in `roots.json` first. Copy `roots.example.json` to `roots.json` and change the paths. Keep the ids: `downloads`, `curated` and `user_library` decide which copy of a duplicate is shown. `downloads` wins over `curated`, and both win over any other folder. Leave project folders out. A folder that is offline is skipped; its files stay in the catalog until the drive is back and you rescan.
 
@@ -39,3 +41,5 @@ Sample tags are still a short list read from the filename and folder. Crash and 
 A full instrument list is larger than the ten links on each family of a browse page. Keys is its own instrument. Crash and rides sit under cymbals. Bass, fx, fills, chords, leads, pads, and plucks are functional tags. Closed, open, and sub are sonic tags. There is no public classification API for that list.
 
 Next step is to tag files with that fuller instrument list, and keep functional and sonic tags separate, still from the filename and folder.
+
+Skins, later. A person should be able to make their own look for the page: a background image, plus colors for the panels, text, and tags. The built-in light and dark themes stay. A skin does not change search, tags, or playback.

@@ -6,6 +6,7 @@ import gzip
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from hoarder.roles import haystack
@@ -71,15 +72,41 @@ def read_set_bpm(path: Path) -> float | None:
 
 
 def live_is_running() -> bool:
+    if sys.platform == "darwin":
+        return _mac_live_is_running()
+    return _windows_live_is_running()
+
+
+def _mac_live_is_running() -> bool:
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-x", "Live"],
+            text=True,
+            timeout=5,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _windows_live_is_running() -> bool:
     try:
         output = subprocess.check_output(
             ["tasklist", "/FO", "CSV", "/NH"],
             text=True,
             errors="replace",
             timeout=5,
+            # pythonw has no console. Without this, tasklist opens a black window on every check.
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return False
+    return _tasklist_has_live(output)
+
+
+def _tasklist_has_live(output: str) -> bool:
     for line in output.splitlines():
         name = line.split(",", 1)[0].strip('"').lower()
         if name.startswith("ableton live"):
@@ -87,11 +114,20 @@ def live_is_running() -> bool:
     return False
 
 
-def newest_log() -> Path | None:
+def ableton_support_dir() -> tuple[Path, str]:
+    """Where Live writes Log.txt. The Mac file sits one folder higher than Windows."""
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Preferences" / "Ableton"
+        return root, "Live */Log.txt"
     root = Path(os.environ.get("APPDATA", "")) / "Ableton"
+    return root, "Live */Preferences/Log.txt"
+
+
+def newest_log() -> Path | None:
+    root, pattern = ableton_support_dir()
     if not root.is_dir():
         return None
-    logs = [path for path in root.glob("Live */Preferences/Log.txt") if path.is_file()]
+    logs = [path for path in root.glob(pattern) if path.is_file()]
     if not logs:
         return None
     return max(logs, key=lambda path: path.stat().st_mtime)

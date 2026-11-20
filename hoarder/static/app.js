@@ -11,6 +11,8 @@ const MIME = {
 };
 
 const PAGE = 1000;
+let sortBy = "name";
+let sortDir = "asc";
 const LEN_MAX = 1000;
 const SEC_HI = 120;
 const ROOTS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -79,7 +81,7 @@ const GENRE_GROUPS = [
 ];
 
 const GENRE_LABEL = Object.fromEntries(GENRE_GROUPS.flat());
-const genreMode = new Map();
+const selectedGenres = new Set();
 
 const audio = $("audio");
 const wave = $("wave");
@@ -142,18 +144,52 @@ function fillKeys(select) {
   }
 }
 
-function bpmValue(id) {
-  const value = Number($(id).value);
-  if (!$(id).value.trim() || !Number.isFinite(value)) return null;
-  return Math.min(BPM_MAX, Math.max(BPM_MIN, value));
-}
-
 function shiftOf(sample) {
   if (!sample || !sample.key || !targetKey()) return 0;
   return semitonesBetween(sample.key, targetKey());
 }
 
 let project = { running: false, bpm: null, name: "" };
+let link = { connected: false, armed: false, bpm: null, host: "" };
+let linkedOn = false;
+let linkLoop = false;
+let linkClip = { loop: false, beats: 0, bpm: 0, repeat: "" };
+let linkFreeAt = 0;
+let linkCoast = null;
+let linkedAudible = false;
+let sawTransport = false;
+let pausedByHost = false;
+let linkWatching = false;
+let hostFix = { ppq: 0, bpm: 0, playing: false, meter: [4, 4], at: 0, age: 0 };
+
+function isPlaying() {
+  if (linkedOn) return linkedAudible;
+  return !audio.paused;
+}
+
+function meterNum() {
+  const meter = link.meter || hostFix.meter;
+  const num = Array.isArray(meter) ? Number(meter[0]) : 4;
+  return num >= 1 && num <= 32 ? num : 4;
+}
+
+function renderBody(sample) {
+  return {
+    semitones: shiftOf(sample) || 0,
+    bpm: project.bpm,
+    stretch: 1,
+    repeat: $("repeat").value || null,
+    meter: meterNum(),
+  };
+}
+
+function paintLink() {
+  const button = $("link");
+  const on = Boolean(link.connected);
+  button.classList.toggle("on", on);
+  button.disabled = !on;
+  button.title = on ? "Plugin connected" : "No plugin connected";
+}
 
 function matchQuery(sample) {
   const params = new URLSearchParams();
@@ -214,10 +250,6 @@ function roleChip(id) {
   return document.querySelector(`#roles .chip[data-id="${CSS.escape(id)}"]`);
 }
 
-function genreChip(id) {
-  return document.querySelector(`#genres .chip[data-id="${CSS.escape(id)}"]`);
-}
-
 function paintRole(id) {
   const button = roleChip(id);
   if (!button) return;
@@ -235,10 +267,10 @@ function toggleRole(id) {
 }
 
 function toggleGenreTag(id) {
-  if (genreMode.get(id) === "include") genreMode.delete(id);
-  else genreMode.set(id, "include");
-  const button = genreChip(id);
-  if (button) paintGenre(button, id, GENRE_LABEL[id] || id);
+  if (selectedGenres.has(id)) selectedGenres.delete(id);
+  else selectedGenres.add(id);
+  paintGenreChecks();
+  paintGenreButton();
   offset = 0;
   refreshList();
 }
@@ -248,7 +280,7 @@ function filterTag(id, label, kind) {
   tag.type = "button";
   tag.className = kind === "genre" ? "tag genre" : "tag";
   tag.textContent = label;
-  const on = kind === "genre" ? genreMode.get(id) === "include" : selectedRoles.has(id);
+  const on = kind === "genre" ? selectedGenres.has(id) : selectedRoles.has(id);
   tag.classList.toggle("on", on);
   tag.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -259,14 +291,257 @@ function filterTag(id, label, kind) {
 }
 
 function fillMeta(meta, sample) {
+  meta.replaceChildren();
+  const tags = document.createElement("span");
+  tags.className = "meta-tags";
+  paintTags(tags, sample);
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "tag-add";
+  add.textContent = "+";
+  add.setAttribute("aria-label", "Edit tags");
+  add.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openTagEditor(sample, add);
+  });
+  const path = document.createElement("span");
+  path.className = "meta-path";
+  path.textContent = folderText(sample);
+  meta.append(tags, add, path);
+}
+
+function paintTags(tags, sample) {
+  tags.replaceChildren();
   for (const id of Array.isArray(sample.roles) ? sample.roles : []) {
-    if (ROLE_LABEL[id]) meta.append(filterTag(id, ROLE_LABEL[id], "role"));
+    if (ROLE_LABEL[id]) tags.append(filterTag(id, ROLE_LABEL[id], "role"));
   }
   for (const id of Array.isArray(sample.genres) ? sample.genres : []) {
-    if (GENRE_LABEL[id]) meta.append(filterTag(id, GENRE_LABEL[id], "genre"));
+    if (GENRE_LABEL[id]) tags.append(filterTag(id, GENRE_LABEL[id], "genre"));
   }
-  const rest = folderText(sample);
-  if (rest) meta.append(document.createTextNode(rest));
+}
+
+function paintRowTags(sample) {
+  const li = document.querySelector(`.hit[data-id="${CSS.escape(String(sample.id))}"]`);
+  const tags = li && li.querySelector(".meta-tags");
+  if (tags) paintTags(tags, sample);
+}
+
+let tagSample = null;
+let tagWrite = Promise.resolve();
+let tagGen = 0;
+
+const picks = [];
+
+function closePicks() {
+  for (const pick of picks) {
+    pick.panel.hidden = true;
+    pick.button.setAttribute("aria-expanded", "false");
+  }
+}
+
+function mountPick(select) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn ghost pick-btn";
+  button.id = `${select.id}-btn`;
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-expanded", "false");
+  const panel = document.createElement("div");
+  panel.className = "menu-panel pick-panel";
+  panel.id = `${select.id}-panel`;
+  panel.hidden = true;
+  panel.setAttribute("role", "listbox");
+  select.classList.add("pick-native");
+  select.hidden = true;
+  const wrap = document.createElement("span");
+  wrap.className = "pick";
+  select.before(wrap);
+  wrap.append(button, panel, select);
+  const insideSettings = Boolean(select.closest("#settings-menu"));
+
+  function paint() {
+    const chosen = select.selectedOptions[0];
+    button.textContent = chosen ? chosen.textContent : "";
+    panel.replaceChildren();
+    const addOption = (option) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "pick-item";
+      row.textContent = option.textContent;
+      row.setAttribute("role", "option");
+      if (option.selected) row.classList.add("on");
+      row.addEventListener("click", (event) => {
+        event.stopPropagation();
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        panel.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+        paint();
+      });
+      panel.append(row);
+    };
+    for (const child of select.children) {
+      if (child.tagName === "OPTGROUP") {
+        const head = document.createElement("div");
+        head.className = "pick-group";
+        head.textContent = child.label;
+        panel.append(head);
+        for (const option of child.children) addOption(option);
+      } else if (child.tagName === "OPTION") {
+        addOption(child);
+      }
+    }
+  }
+
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = panel.hidden;
+    closePicks();
+    if (!insideSettings) {
+      for (const id of ["settings-menu", "help-menu", "genre-panel"]) {
+        const other = $(id);
+        if (other) other.hidden = true;
+      }
+      for (const id of ["settings", "help", "genre-btn"]) {
+        const other = $(id);
+        if (other) other.setAttribute("aria-expanded", "false");
+      }
+      closeFileMenu();
+      closeTagEditor();
+    }
+    if (!willOpen) return;
+    panel.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    panel.style.top = "";
+    panel.style.bottom = "";
+    const rect = panel.getBoundingClientRect();
+    if (rect.bottom > window.innerHeight - 8) {
+      panel.style.top = "auto";
+      panel.style.bottom = "calc(100% + 6px)";
+    }
+  });
+  panel.addEventListener("click", (event) => event.stopPropagation());
+  picks.push({ button, panel });
+  paint();
+}
+
+function hideMenus() {
+  for (const id of ["settings-menu", "help-menu", "genre-panel", "file-menu"]) {
+    const panel = $(id);
+    if (panel) panel.hidden = true;
+  }
+  for (const id of ["settings", "help", "genre-btn"]) {
+    const button = $(id);
+    if (button) button.setAttribute("aria-expanded", "false");
+  }
+  closePicks();
+  menuSample = null;
+}
+
+function openTagEditor(sample, anchor) {
+  const editor = $("tag-editor");
+  const same = tagSample && tagSample.id === sample.id && !editor.hidden;
+  hideMenus();
+  if (same) {
+    closeTagEditor();
+    return;
+  }
+  tagSample = sample;
+  for (const input of editor.querySelectorAll("input")) {
+    const list = input.dataset.kind === "genre" ? sample.genres : sample.roles;
+    input.checked = Array.isArray(list) && list.includes(input.value);
+  }
+  editor.hidden = false;
+  anchor.classList.add("on");
+  const rect = anchor.getBoundingClientRect();
+  editor.style.left = `${Math.max(8, rect.left)}px`;
+  editor.style.top = `${rect.bottom + 6}px`;
+  const box = editor.getBoundingClientRect();
+  if (box.right > window.innerWidth - 8) {
+    editor.style.left = `${Math.max(8, window.innerWidth - box.width - 8)}px`;
+  }
+  if (box.bottom > window.innerHeight - 8) {
+    editor.style.top = `${Math.max(8, rect.top - box.height - 6)}px`;
+  }
+}
+
+function closeTagEditor() {
+  tagSample = null;
+  $("tag-editor").hidden = true;
+  for (const button of document.querySelectorAll(".tag-add.on")) button.classList.remove("on");
+}
+
+function stillMatches(sample) {
+  for (const id of selectedRoles) {
+    if (!sample.roles.includes(id)) return false;
+  }
+  for (const id of selectedGenres) {
+    if (!sample.genres.includes(id)) return false;
+  }
+  return true;
+}
+
+function onTagChange() {
+  const sample = tagSample;
+  if (!sample) return;
+  const gen = ++tagGen;
+  const roles = [...$("tag-editor").querySelectorAll('input[data-kind="role"]:checked')].map((input) => input.value);
+  const genres = [...$("tag-editor").querySelectorAll('input[data-kind="genre"]:checked')].map((input) => input.value);
+  sample.roles = roles;
+  sample.genres = genres;
+  paintRowTags(sample);
+  const id = sample.id;
+  tagWrite = tagWrite.then(async () => {
+    const response = await fetch(`/api/samples/${id}/tags`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ roles, genres }),
+    });
+    if (gen !== tagGen) return;
+    if (!response.ok) {
+      closeTagEditor();
+      refreshList();
+      return;
+    }
+    const body = await response.json();
+    if (gen !== tagGen) return;
+    sample.roles = body.roles;
+    sample.genres = body.genres;
+    const li = document.querySelector(`.hit[data-id="${CSS.escape(String(id))}"]`);
+    if (li) li.dataset.savedTags = `${body.roles.join(",")}|${body.genres.join(",")}`;
+    if (tagSample && tagSample.id === id) {
+      paintRowTags(sample);
+      if (!stillMatches(sample)) {
+        closeTagEditor();
+        offset = 0;
+        refreshList();
+      }
+    }
+  }).catch(() => {
+    closeTagEditor();
+    refreshList();
+  });
+}
+
+function tagCheck(id, label, kind) {
+  const row = document.createElement("label");
+  row.className = kind === "genre" ? "check genre" : "check role";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.value = id;
+  input.dataset.kind = kind;
+  input.addEventListener("change", () => onTagChange());
+  row.append(input, document.createTextNode(label));
+  return row;
+}
+
+function fillTagEditor() {
+  const roles = $("tag-editor-roles");
+  const genres = $("tag-editor-genres");
+  roles.replaceChildren();
+  genres.replaceChildren();
+  for (const [id, label] of ROLE_GROUPS.flat()) roles.append(tagCheck(id, label, "role"));
+  for (const [id, label] of GENRE_GROUPS.flat()) genres.append(tagCheck(id, label, "genre"));
 }
 
 function params() {
@@ -279,23 +554,17 @@ function params() {
   if (roles.length) query.set("roles", roles.join(","));
   const genres = GENRE_GROUPS.flat()
     .map(([id]) => id)
-    .filter((id) => genreMode.get(id) === "include");
-  const excluded = GENRE_GROUPS.flat()
-    .map(([id]) => id)
-    .filter((id) => genreMode.get(id) === "exclude");
+    .filter((id) => selectedGenres.has(id));
   if (genres.length) query.set("genres", genres.join(","));
-  if (excluded.length) query.set("exclude_genres", excluded.join(","));
   const bounds = lengthBounds();
   if (bounds.min != null) query.set("min_sec", String(bounds.min));
   if (bounds.max != null) query.set("max_sec", String(bounds.max));
-  const minBpm = bpmValue("bpm-min");
-  const maxBpm = bpmValue("bpm-max");
-  if (minBpm != null) query.set("min_bpm", String(minBpm));
-  if (maxBpm != null) query.set("max_bpm", String(maxBpm));
+  const tempo = tempoBounds();
+  if (tempo.min != null) query.set("min_bpm", String(tempo.min));
+  if (tempo.max != null) query.set("max_bpm", String(tempo.max));
   if ($("key-filter").value) query.set("key", $("key-filter").value);
-  const [sort, direction] = $("sort").value.split(":");
-  query.set("sort", sort);
-  query.set("direction", direction);
+  query.set("sort", sortBy);
+  query.set("direction", sortDir);
   if ($("hide-dupes").checked) query.set("unique", "1");
   query.set("limit", String(PAGE));
   query.set("offset", String(offset));
@@ -390,6 +659,113 @@ function setLength(which, pos) {
   onLengthInput(which);
 }
 
+const BPM_SPAN = BPM_MAX - BPM_MIN;
+
+function tempoBounds() {
+  const min = Number($("bpm-min").value);
+  const max = Number($("bpm-max").value);
+  return {
+    min: min <= BPM_MIN && max > BPM_MIN ? null : min,
+    max: max >= BPM_MAX && min < BPM_MAX ? null : max,
+  };
+}
+
+function paintTempo() {
+  const min = Number($("bpm-min").value);
+  const max = Number($("bpm-max").value);
+  const fill = $("tempo-fill");
+  const span = Math.max(0, max - min) / BPM_SPAN;
+  fill.style.left = `calc(6px + (100% - 12px) * ${(min - BPM_MIN) / BPM_SPAN})`;
+  fill.style.width = `calc((100% - 12px) * ${span})`;
+  const bounds = tempoBounds();
+  const label = $("tempo-label");
+  if (bounds.min == null && bounds.max == null) label.textContent = "Any tempo";
+  else if (bounds.min == null) label.textContent = `≤ ${bounds.max}`;
+  else if (bounds.max == null) label.textContent = `≥ ${bounds.min}`;
+  else if (bounds.min === bounds.max) label.textContent = `${bounds.min} BPM`;
+  else label.textContent = `${bounds.min} – ${bounds.max}`;
+  const exact = $("tempo-exact");
+  if (document.activeElement !== exact) {
+    exact.value = bounds.min != null && bounds.min === bounds.max ? String(bounds.min) : "";
+  }
+}
+
+function applyExactTempo() {
+  const exact = $("tempo-exact");
+  const raw = exact.value.trim();
+  if (!raw) {
+    const bounds = tempoBounds();
+    if (bounds.min != null && bounds.min === bounds.max) {
+      $("bpm-min").value = String(BPM_MIN);
+      $("bpm-max").value = String(BPM_MAX);
+      paintTempo();
+      scheduleList();
+    }
+    return;
+  }
+  const value = Math.round(Number(raw));
+  if (!Number.isFinite(value)) return;
+  const bpm = Math.min(BPM_MAX, Math.max(BPM_MIN, value));
+  $("bpm-min").value = String(bpm);
+  $("bpm-max").value = String(bpm);
+  exact.value = String(bpm);
+  paintTempo();
+  scheduleList();
+}
+
+function onTempoInput(which) {
+  const minEl = $("bpm-min");
+  const maxEl = $("bpm-max");
+  const min = Number(minEl.value);
+  const max = Number(maxEl.value);
+  if (min > max) {
+    if (which === "min") maxEl.value = String(min);
+    else minEl.value = String(max);
+  }
+  paintTempo();
+  scheduleList();
+}
+
+function tempoPos(event, range) {
+  const rect = range.getBoundingClientRect();
+  const ratio = (event.clientX - rect.left - 6) / Math.max(1, rect.width - 12);
+  return Math.round(Math.min(BPM_MAX, Math.max(BPM_MIN, BPM_MIN + ratio * BPM_SPAN)));
+}
+
+function tempoTarget(pos) {
+  const min = Number($("bpm-min").value);
+  const max = Number($("bpm-max").value);
+  if (pos <= min) return "min";
+  if (pos >= max) return "max";
+  return pos - min <= max - pos ? "min" : "max";
+}
+
+function setTempo(which, pos) {
+  $(which === "min" ? "bpm-min" : "bpm-max").value = String(pos);
+  $("bpm-min").style.zIndex = which === "min" ? "2" : "1";
+  $("bpm-max").style.zIndex = which === "max" ? "2" : "1";
+  onTempoInput(which);
+}
+
+function bindRange(id, posOf, targetOf, apply) {
+  const range = $(id);
+  range.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest("input")) return;
+    const which = targetOf(posOf(event, range));
+    const move = (ev) => apply(which, posOf(ev, range));
+    move(event);
+    range.setPointerCapture(event.pointerId);
+    const end = () => {
+      range.removeEventListener("pointermove", move);
+      range.removeEventListener("pointerup", end);
+      range.removeEventListener("pointercancel", end);
+    };
+    range.addEventListener("pointermove", move);
+    range.addEventListener("pointerup", end);
+    range.addEventListener("pointercancel", end);
+  });
+}
+
 function renderRoles() {
   const box = $("roles");
   box.replaceChildren();
@@ -410,38 +786,42 @@ function renderRoles() {
   }
 }
 
-function paintGenre(button, id, label) {
-  const mode = genreMode.get(id) || "";
-  button.classList.toggle("on", mode === "include");
-  button.classList.toggle("exclude", mode === "exclude");
-  button.textContent = mode === "exclude" ? `Not ${label}` : label;
-  button.setAttribute("aria-pressed", mode === "include" ? "true" : "false");
+function paintGenreButton() {
+  const button = $("genre-btn");
+  const picked = GENRE_GROUPS.flat()
+    .map(([id]) => id)
+    .filter((id) => selectedGenres.has(id));
+  button.classList.toggle("on", picked.length > 0);
+  if (picked.length === 0) button.textContent = "Any";
+  else if (picked.length === 1) button.textContent = GENRE_LABEL[picked[0]] || picked[0];
+  else button.textContent = `${picked.length} selected`;
+}
+
+function paintGenreChecks() {
+  for (const input of document.querySelectorAll("#genre-panel input")) {
+    input.checked = selectedGenres.has(input.value);
+  }
 }
 
 function renderGenres() {
-  const box = $("genres");
+  const box = $("genre-panel");
   box.replaceChildren();
-  for (const group of GENRE_GROUPS) {
-    const wrap = document.createElement("div");
-    wrap.className = "sounds-group";
-    for (const [id, label] of group) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "chip genre";
-      button.dataset.id = id;
-      paintGenre(button, id, label);
-      button.addEventListener("click", () => {
-        const mode = genreMode.get(id);
-        if (!mode) genreMode.set(id, "include");
-        else if (mode === "include") genreMode.set(id, "exclude");
-        else genreMode.delete(id);
-        paintGenre(button, id, label);
-        offset = 0;
-        refreshList();
-      });
-      wrap.append(button);
-    }
-    box.append(wrap);
+  for (const [id, label] of GENRE_GROUPS.flat()) {
+    const row = document.createElement("label");
+    row.className = "check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = id;
+    input.checked = selectedGenres.has(id);
+    input.addEventListener("change", () => {
+      if (input.checked) selectedGenres.add(id);
+      else selectedGenres.delete(id);
+      paintGenreButton();
+      offset = 0;
+      refreshList();
+    });
+    row.append(input, document.createTextNode(label));
+    box.append(row);
   }
 }
 
@@ -450,6 +830,15 @@ async function refreshProject() {
     const response = await fetch("/api/project");
     if (!response.ok) return;
     const body = await response.json();
+    if (body.link) noteHost(body.link);
+    if (link.connected && !link.armed) {
+      fetch("/api/link/arm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: true }),
+      }).catch(() => {});
+    }
+    paintLink();
     const next = body.bpm ? Math.round(body.bpm) : null;
     const prev = project.bpm ? Math.round(project.bpm) : null;
     project = body;
@@ -462,7 +851,7 @@ async function refreshProject() {
       label.hidden = true;
       label.textContent = "";
     }
-    if (next !== prev && current && !audio.paused) play(current);
+    if (next !== prev && current && isPlaying()) play(current);
   } catch (_) {}
 }
 
@@ -501,10 +890,9 @@ async function refreshList() {
 }
 
 function paintSortArrows() {
-  const [sort, direction] = $("sort").value.split(":");
   for (const button of document.querySelectorAll("#hit-head .col-sort")) {
-    const on = button.dataset.sort === sort;
-    const dir = on ? direction : "asc";
+    const on = button.dataset.sort === sortBy;
+    const dir = on ? sortDir : "asc";
     button.classList.toggle("on", on);
     button.classList.toggle("up", dir === "asc");
     button.classList.toggle("down", dir !== "asc");
@@ -513,15 +901,16 @@ function paintSortArrows() {
 }
 
 function applySort(sort, direction) {
-  const value = `${sort}:${direction}`;
-  if ($("sort").value === value) return;
-  $("sort").value = value;
+  if (sortBy === sort && sortDir === direction) return;
+  sortBy = sort;
+  sortDir = direction;
   offset = 0;
   paintSortArrows();
   refreshList();
 }
 
 function drawList(body) {
+  closeTagEditor();
   pageItems = body.items;
   const hits = $("hits");
   const pager = $("pager");
@@ -565,20 +954,21 @@ function syncResultsBar() {
 function renderHit(sample) {
   const li = document.createElement("li");
   li.className = "hit" + (current && current.id === sample.id ? " on" : "");
-  li.draggable = true;
+  li.draggable = !nativeDrag;
   li.dataset.id = String(sample.id);
   li.title = sample.path || "";
 
   const play = document.createElement("button");
   play.type = "button";
   play.className = "hit-play";
-  play.textContent = current && current.id === sample.id && !audio.paused ? "■" : "▶";
+  play.textContent = current && current.id === sample.id && isPlaying() ? "■" : "▶";
   play.addEventListener("click", (event) => {
     event.stopPropagation();
     toggle(sample);
   });
 
   const body = document.createElement("div");
+  body.className = "hit-body";
   const name = document.createElement("div");
   name.className = "name";
   name.textContent = sample.name;
@@ -600,7 +990,13 @@ function renderHit(sample) {
   dur.textContent = fmtDur(sample.duration);
 
   li.append(play, body, bpm, key, dur);
-  li.addEventListener("click", () => toggle(sample));
+  li.addEventListener("click", () => {
+    if (li.dataset.dragged) {
+      delete li.dataset.dragged;
+      return;
+    }
+    toggle(sample);
+  });
   li.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -636,6 +1032,20 @@ function reveal(sample) {
   });
 }
 
+function copyModified(sample) {
+  fetch(`/api/samples/${sample.id}/copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(renderBody(sample)),
+  }).then((response) => {
+    $("now-path").textContent = response.ok
+      ? "Copied the modified sample."
+      : "Couldn't copy the modified sample.";
+  }).catch(() => {
+    $("now-path").textContent = "Couldn't copy the modified sample.";
+  });
+}
+
 function remember(id, file) {
   if (fileCache.has(id)) fileCache.delete(id);
   fileCache.set(id, file);
@@ -658,6 +1068,12 @@ function warm(sample) {
 }
 
 function dragFile(sample) {
+  if (link.connected) {
+    return {
+      name: safeName(sample.name),
+      url: `${location.origin}/api/samples/${sample.id}/file`,
+    };
+  }
   const query = matchQuery(sample);
   if (query) {
     const stem = safeName(sample.name).replace(/\.[^.]+$/i, "");
@@ -667,46 +1083,71 @@ function dragFile(sample) {
     return {
       name: safeName(`${bits.join(" ")}.wav`),
       url: `${location.origin}/api/samples/${sample.id}/file${query}`,
-      type: "audio/wav",
-      file: null,
     };
   }
   return {
     name: safeName(sample.name),
     url: `${location.origin}/api/samples/${sample.id}/file`,
-    type: mimeFor(sample.ext),
-    file: fileCache.get(sample.id) || null,
   };
 }
 
+const nativeDrag = /Windows/.test(navigator.userAgent);
+
 function bindDrag(el, getSample) {
-  el.addEventListener("pointerdown", () => {
+  let start = null;
+  el.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !nativeDrag) return;
+    if (event.target.closest("button")) return;
     const sample = getSample();
-    if (sample && !matchQuery(sample)) warm(sample);
+    if (!sample) return;
+    start = { x: event.clientX, y: event.clientY, id: sample.id, pointer: event.pointerId, sent: false };
   });
+  el.addEventListener("pointermove", (event) => {
+    if (!start || start.sent || start.pointer !== event.pointerId) return;
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    if (dx * dx + dy * dy < 16) return;
+    start.sent = true;
+    el.dataset.dragged = "1";
+    if (el.hasPointerCapture(event.pointerId)) el.releasePointerCapture(event.pointerId);
+    const sample = getSample();
+    if (!sample) return;
+    $("now-path").textContent = "Dragging the sample…";
+    fetch(`/api/samples/${sample.id}/drag`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(renderBody(sample)),
+    }).then((response) => response.json().then((body) => ({ ok: response.ok, body }))).then((result) => {
+      if (!result.ok) {
+        $("now-path").textContent = "Couldn't drag the sample.";
+        return;
+      }
+      $("now-path").textContent = result.body.effect ? "Dropped the sample." : "Drag cancelled.";
+    }).catch(() => {
+      $("now-path").textContent = "Couldn't drag the sample.";
+    });
+  });
+  const end = () => {
+    start = null;
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
   el.addEventListener("dragstart", (event) => {
+    if (nativeDrag) {
+      event.preventDefault();
+      return;
+    }
     const sample = getSample();
     if (!sample) {
       event.preventDefault();
       return;
     }
     const drop = dragFile(sample);
-    event.dataTransfer.effectAllowed = "copy";
-    if (drop.file) {
-      try {
-        event.dataTransfer.items.add(drop.file);
-      } catch (_) {
-        /* DownloadURL below still hands Ableton a file. */
-      }
-    }
-    // Chromium turns this into a file drop Live can place on a track.
-    // A matched drop is a wav with the pitch and the project tempo baked in.
-    // The cached original is left out of that drag.
-    event.dataTransfer.setData("DownloadURL", `${drop.type}:${drop.name}:${drop.url}`);
-    if (drop.file) {
-      event.dataTransfer.setData("text/uri-list", drop.url);
-      event.dataTransfer.setData("text/plain", drop.name);
-    }
+    const transfer = event.dataTransfer;
+    transfer.clearData();
+    transfer.effectAllowed = "copy";
+    // Live rejects an in-memory file and a web link. DownloadURL is the file drop it accepts.
+    transfer.setData("DownloadURL", `application/octet-stream:${drop.name}:${drop.url}`);
   });
 }
 
@@ -715,32 +1156,30 @@ function showCurrent(sample) {
   $("now-name").textContent = pitchedLabel(sample);
   $("now-path").textContent = sample ? sample.path : "";
   $("play").disabled = !sample;
+  $("play").textContent = isPlaying() ? "Stop" : "Play";
+  $("play").classList.toggle("on", isPlaying());
   for (const row of $("hits").querySelectorAll(".hit")) {
     const on = sample && row.title === sample.path;
     row.classList.toggle("on", on);
     const button = row.querySelector(".hit-play");
-    if (button) button.textContent = on && !audio.paused ? "■" : "▶";
+    if (button) button.textContent = on && isPlaying() ? "■" : "▶";
   }
 }
 
-async function play(sample) {
-  const token = ++loadToken;
-  showCurrent(sample);
-  warm(sample);
-  $("play").textContent = "Play";
+async function showWaveform(sample, token) {
   const response = await fetch(`/api/samples/${sample.id}/preview${matchQuery(sample)}`);
-  if (token !== loadToken) return;
+  if (token !== loadToken) return false;
   if (!response.ok) {
     $("now-path").textContent = "Can't preview this file. Drag still drops the original.";
     audio.removeAttribute("src");
     peaks = null;
     drawWave();
     placePlayhead();
-    return;
+    return false;
   }
   const type = response.headers.get("content-type") || "audio/wav";
   const bytes = await response.arrayBuffer();
-  if (token !== loadToken) return;
+  if (token !== loadToken) return false;
   if (blobUrl) URL.revokeObjectURL(blobUrl);
   blobUrl = URL.createObjectURL(new Blob([bytes], { type }));
   audio.src = blobUrl;
@@ -756,18 +1195,218 @@ async function play(sample) {
   }
   drawWave();
   placePlayhead();
-  await audio.play();
-  $("play").textContent = "Stop";
-  $("play").classList.add("on");
+  return true;
+}
+
+async function play(sample) {
+  const token = ++loadToken;
+  const linked = Boolean(link.connected);
+  pausedByHost = false;
+  linkedOn = linked;
+  if (linked) linkedAudible = true;
+  if (linked) {
+    audio.pause();
+    stopWave();
+    watchLink();
+  }
+  showCurrent(sample);
+  warm(sample);
+  const sent = linked ? playLinked(sample, token) : Promise.resolve(true);
+  const drawn = showWaveform(sample, token);
+  const ok = await sent;
+  if (token !== loadToken) return;
+  if (!ok) {
+    linkedOn = false;
+    linkedAudible = false;
+    showCurrent(sample);
+    $("now-path").textContent = "Plugin link didn't take the preview.";
+    return;
+  }
+  const hasWave = await drawn;
+  if (token !== loadToken) return;
+  if (!hasWave && !linked) return;
+  audio.muted = linked;
+  audio.loop = false;
+  if (linked) {
+    armLinkClock();
+    startWave();
+  } else {
+    try {
+      await audio.play();
+    } catch (_) {
+      return;
+    }
+  }
   showCurrent(sample);
 }
 
+async function playLinked(sample, token) {
+  const response = await fetch("/api/link/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: sample.id,
+      semitones: shiftOf(sample) || 0,
+      bpm: project.bpm,
+      stretch: 1,
+      repeat: $("repeat").value || null,
+    }),
+  });
+  if (token !== loadToken) return false;
+  if (!response.ok) return false;
+  const body = await response.json();
+  linkLoop = Boolean(body.loop);
+  linkClip = {
+    loop: linkLoop,
+    beats: Number(body.beats) || 0,
+    bpm: Number(body.bpm) || 0,
+    repeat: body.repeat || "",
+  };
+  return true;
+}
+
 function stop() {
+  if (linkedOn) fetch("/api/link/stop", { method: "POST" }).catch(() => {});
+  linkedOn = false;
+  linkedAudible = false;
+  pausedByHost = false;
+  linkLoop = false;
+  linkCoast = null;
+  audio.loop = false;
+  audio.muted = false;
   audio.pause();
   stopWave();
   $("play").textContent = "Play";
   $("play").classList.remove("on");
   showCurrent(current);
+}
+
+function noteHost(snap) {
+  const playing = Boolean(snap.playing);
+  if (linkedOn && linkedAudible && sawTransport && !playing) {
+    linkedAudible = false;
+    pausedByHost = true;
+    linkCoast = null;
+    stopWave();
+    showCurrent(current);
+  } else if (linkedOn && pausedByHost && !sawTransport && playing) {
+    pausedByHost = false;
+    armLinkClock();
+    startWave();
+    showCurrent(current);
+  }
+  sawTransport = playing;
+  hostFix = {
+    ppq: Number(snap.ppq) || 0,
+    bpm: Number(snap.bpm) || 0,
+    playing,
+    meter: Array.isArray(snap.meter) ? snap.meter : [4, 4],
+    at: performance.now(),
+    age: Number(snap.age_ms) || 0,
+  };
+  link = snap;
+  paintLink();
+}
+
+function watchLink() {
+  if (linkWatching) return;
+  linkWatching = true;
+  const tick = async () => {
+    if (!linkedOn) {
+      linkWatching = false;
+      return;
+    }
+    try {
+      const response = await fetch("/api/link");
+      if (response.ok && linkedOn) noteHost(await response.json());
+    } catch (_) {}
+    if (linkedOn) setTimeout(tick, 50);
+    else linkWatching = false;
+  };
+  tick();
+}
+
+function armLinkClock() {
+  linkedAudible = true;
+  linkCoast = null;
+  linkFreeAt = performance.now();
+  sawTransport = hostFix.playing;
+}
+
+function wrapPhase(value, length) {
+  if (length <= 0) return 0;
+  let phase = value % length;
+  if (phase < 0) phase += length;
+  return phase;
+}
+
+function repeatInterval(rate, meterNum) {
+  if (rate === "1/16") return 0.25;
+  if (rate === "1/8") return 0.5;
+  if (rate === "1/4") return 1;
+  if (rate === "1/2") return 2;
+  const bars = Math.max(1, Number(meterNum) || 4);
+  if (rate === "1bar") return bars;
+  if (rate === "2bar") return 2 * bars;
+  if (rate === "4bar") return 4 * bars;
+  return 0;
+}
+
+function linkFileSeconds() {
+  if (Number.isFinite(audio.duration) && audio.duration > 0) return audio.duration;
+  const bpm = linkClip.bpm || hostFix.bpm;
+  if (linkClip.beats > 0 && bpm > 0) return linkClip.beats * 60 / bpm;
+  return 0;
+}
+
+function hostNow(now) {
+  const extra = hostFix.playing && hostFix.bpm
+    ? ((hostFix.age + (now - hostFix.at)) / 1000) * hostFix.bpm / 60
+    : 0;
+  return {
+    ppq: hostFix.ppq + extra,
+    bpm: hostFix.bpm,
+    playing: hostFix.playing,
+    meter: hostFix.meter,
+  };
+}
+
+function linkedRatio(now) {
+  if (!linkedAudible) return null;
+  const host = hostNow(now);
+  const seconds = linkFileSeconds();
+  const beats = linkClip.beats;
+  const bpm = host.bpm;
+  const rendered = linkClip.bpm;
+  const tempoHolds = rendered <= 0 || bpm <= 0 || Math.abs(bpm - rendered) < 0.51;
+  const interval = repeatInterval(linkClip.repeat, host.meter[0]);
+  const repeating = interval > 0 && bpm > 0;
+  if (host.playing && repeating) {
+    const at = wrapPhase(host.ppq, interval) * 60 / bpm;
+    if (seconds <= 0 || at >= seconds) return null;
+    return at / seconds;
+  }
+  if (!host.playing && repeating && seconds > 0) {
+    const beatsIn = ((now - linkFreeAt) / 1000) * bpm / 60;
+    const at = wrapPhase(beatsIn, interval) * 60 / bpm;
+    if (at >= seconds) return null;
+    return at / seconds;
+  }
+  const gridLoop = host.playing && linkClip.loop && beats > 0;
+  if (gridLoop && !tempoHolds) {
+    if (!linkCoast) {
+      linkCoast = { ratio: wrapPhase(host.ppq, beats) / beats, at: now };
+    }
+    if (seconds <= 0) return linkCoast.ratio;
+    return wrapPhase(linkCoast.ratio + (now - linkCoast.at) / 1000 / seconds, 1);
+  }
+  linkCoast = null;
+  if (gridLoop) return wrapPhase(host.ppq, beats) / beats;
+  if (seconds <= 0) return 0;
+  const elapsed = (now - linkFreeAt) / 1000;
+  if (linkClip.loop) return wrapPhase(elapsed / seconds, 1);
+  if (elapsed >= seconds) return 1;
+  return elapsed / seconds;
 }
 
 function scrollToSample(id) {
@@ -819,7 +1458,7 @@ async function playPrevious() {
 
 function toggle(sample) {
   if (!sample) return;
-  if (current && current.id === sample.id && !audio.paused) {
+  if (current && current.id === sample.id && isPlaying()) {
     stop();
     return;
   }
@@ -879,6 +1518,22 @@ let waveRaf = 0;
 
 function placePlayhead() {
   const head = $("playhead");
+  if (linkedOn) {
+    const ratio = linkedRatio(performance.now());
+    const seconds = linkFileSeconds();
+    if (ratio == null) {
+      head.hidden = true;
+      return;
+    }
+    head.hidden = false;
+    const x = Math.round(Math.min(1, Math.max(0, ratio)) * (wave.clientWidth || 0));
+    head.style.transform = `translate3d(${x}px,0,0)`;
+    if (seconds) {
+      const label = `${fmtClock(ratio * seconds)} / ${fmtClock(seconds)}`;
+      if ($("now-time").textContent !== label) $("now-time").textContent = label;
+    }
+    return;
+  }
   const ratio = audio.duration ? Math.min(1, Math.max(0, audio.currentTime / audio.duration)) : 0;
   const playing = !audio.paused && !audio.ended;
   if (!playing && ratio <= 0) {
@@ -896,7 +1551,8 @@ function placePlayhead() {
 
 function waveFrame() {
   placePlayhead();
-  if (!audio.paused && !audio.ended) waveRaf = requestAnimationFrame(waveFrame);
+  const running = linkedOn ? linkedAudible : !audio.paused && !audio.ended;
+  if (running) waveRaf = requestAnimationFrame(waveFrame);
   else waveRaf = 0;
 }
 
@@ -929,10 +1585,36 @@ function poll() {
   }, 700);
 }
 
+const FONT_MIN = 0.8;
+const FONT_MAX = 1.6;
+const FONT_STEP = 0.1;
+
+function currentFontScale() {
+  const raw = Number(getComputedStyle(document.documentElement).getPropertyValue("--font-scale"));
+  if (!Number.isFinite(raw)) return 1;
+  const stepped = Math.round(raw * 10) / 10;
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, stepped));
+}
+
+function applyFontScale(scale) {
+  const next = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(scale * 10) / 10));
+  document.documentElement.style.setProperty("--font-scale", String(next));
+  try {
+    localStorage.setItem("hoarder-font-scale", String(next));
+  } catch (_) {}
+  $("font-size-label").textContent = `${Math.round(next * 100)}%`;
+  $("font-down").disabled = next <= FONT_MIN;
+  $("font-up").disabled = next >= FONT_MAX;
+}
+
 function bind() {
   try {
     $("hide-dupes").checked = localStorage.getItem("hoarder-hide-dupes") !== "0";
   } catch (_) {}
+
+  applyFontScale(currentFontScale());
+  $("font-down").addEventListener("click", () => applyFontScale(currentFontScale() - FONT_STEP));
+  $("font-up").addEventListener("click", () => applyFontScale(currentFontScale() + FONT_STEP));
 
   $("theme").value = document.documentElement.dataset.theme || "dark";
   $("theme").addEventListener("change", () => {
@@ -942,22 +1624,9 @@ function bind() {
   });
 
   paintLength();
-  const lengthRange = document.querySelector(".length .range");
-  lengthRange.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.target.closest("input")) return;
-    const which = lengthTarget(lengthPos(event, lengthRange));
-    const move = (ev) => setLength(which, lengthPos(ev, lengthRange));
-    move(event);
-    lengthRange.setPointerCapture(event.pointerId);
-    const end = () => {
-      lengthRange.removeEventListener("pointermove", move);
-      lengthRange.removeEventListener("pointerup", end);
-      lengthRange.removeEventListener("pointercancel", end);
-    };
-    lengthRange.addEventListener("pointermove", move);
-    lengthRange.addEventListener("pointerup", end);
-    lengthRange.addEventListener("pointercancel", end);
-  });
+  paintTempo();
+  bindRange("length-range", lengthPos, lengthTarget, setLength);
+  bindRange("tempo-range", tempoPos, tempoTarget, setTempo);
   for (const id of ["len-min", "len-max"]) {
     const which = id === "len-min" ? "min" : "max";
     $(id).addEventListener("pointerdown", () => {
@@ -966,74 +1635,116 @@ function bind() {
     });
     $(id).addEventListener("input", () => onLengthInput(which));
   }
+  for (const id of ["bpm-min", "bpm-max"]) {
+    const which = id === "bpm-min" ? "min" : "max";
+    $(id).addEventListener("pointerdown", () => {
+      $("bpm-min").style.zIndex = which === "min" ? "2" : "1";
+      $("bpm-max").style.zIndex = which === "max" ? "2" : "1";
+    });
+    $(id).addEventListener("input", () => onTempoInput(which));
+  }
+  const tempoExact = $("tempo-exact");
+  tempoExact.addEventListener("change", () => applyExactTempo());
+  tempoExact.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    applyExactTempo();
+  });
 
   renderRoles();
   renderGenres();
+  fillTagEditor();
+  $("tag-editor").addEventListener("click", (event) => event.stopPropagation());
   $("q").addEventListener("input", () => scheduleList());
   fillKeys($("target-key"));
   fillKeys($("key-filter"));
-  for (const id of ["bpm-min", "bpm-max"]) $(id).addEventListener("input", () => scheduleList());
-  for (const id of ["key-filter", "sort"]) {
-    $(id).addEventListener("change", () => {
-      offset = 0;
-      if (id === "sort") paintSortArrows();
-      refreshList();
-    });
-  }
+  mountPick($("repeat"));
+  mountPick($("target-key"));
+  mountPick($("key-filter"));
+  mountPick($("theme"));
+  $("key-filter").addEventListener("change", () => {
+    offset = 0;
+    refreshList();
+  });
   paintSortArrows();
   $("hit-head").addEventListener("click", (event) => {
     const button = event.target.closest(".col-sort");
     if (!button) return;
-    const [current, direction] = $("sort").value.split(":");
-    const next = current === button.dataset.sort && direction === "asc" ? "desc" : "asc";
+    const next = sortBy === button.dataset.sort && sortDir === "asc" ? "desc" : "asc";
     applySort(button.dataset.sort, next);
   });
 
   $("target-key").addEventListener("change", () => {
     if (!current) return;
     $("now-name").textContent = pitchedLabel(current);
-    if (!audio.paused) play(current);
+    if (isPlaying()) play(current);
   });
 
   const settings = $("settings");
   const menu = $("settings-menu");
   const helpBtn = $("help");
   const helpMenu = $("help-menu");
+  const genreBtn = $("genre-btn");
+  const genrePanel = $("genre-panel");
   function setMenu(button, panel, open) {
     panel.hidden = !open;
     button.setAttribute("aria-expanded", open ? "true" : "false");
   }
+  function closePopups() {
+    setMenu(settings, menu, false);
+    setMenu(helpBtn, helpMenu, false);
+    setMenu(genreBtn, genrePanel, false);
+    closePicks();
+    closeFileMenu();
+    closeTagEditor();
+  }
   settings.addEventListener("click", (event) => {
     event.stopPropagation();
+    closePicks();
     const open = menu.hidden;
     setMenu(helpBtn, helpMenu, false);
+    setMenu(genreBtn, genrePanel, false);
     setMenu(settings, menu, open);
   });
   helpBtn.addEventListener("click", (event) => {
     event.stopPropagation();
+    closePicks();
     const open = helpMenu.hidden;
     setMenu(settings, menu, false);
+    setMenu(genreBtn, genrePanel, false);
     setMenu(helpBtn, helpMenu, open);
+  });
+  genreBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closePicks();
+    const open = genrePanel.hidden;
+    setMenu(settings, menu, false);
+    setMenu(helpBtn, helpMenu, false);
+    setMenu(genreBtn, genrePanel, open);
   });
   menu.addEventListener("click", (event) => event.stopPropagation());
   helpMenu.addEventListener("click", (event) => event.stopPropagation());
-  document.addEventListener("click", () => {
-    setMenu(settings, menu, false);
-    setMenu(helpBtn, helpMenu, false);
-    closeFileMenu();
-  });
+  genrePanel.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("click", () => closePopups());
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    setMenu(settings, menu, false);
-    setMenu(helpBtn, helpMenu, false);
-    closeFileMenu();
+    closePopups();
   });
-  $("hits").addEventListener("scroll", () => closeFileMenu());
+  $("hits").addEventListener("scroll", () => {
+    closeFileMenu();
+    closeTagEditor();
+  });
   $("open-explorer").addEventListener("click", (event) => {
     event.stopPropagation();
     const sample = menuSample;
     closeFileMenu();
     if (sample) reveal(sample);
+  });
+  $("copy-modified").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const sample = menuSample;
+    closeFileMenu();
+    if (sample) copyModified(sample);
   });
   $("hide-dupes").addEventListener("change", () => {
     try {
@@ -1064,22 +1775,24 @@ function bind() {
   });
   $("play").addEventListener("click", () => {
     if (!current) return;
-    if (audio.paused) play(current);
-    else stop();
+    if (isPlaying()) stop();
+    else play(current);
   });
-
+  $("repeat").addEventListener("change", () => {
+    if (link.connected && current && linkedOn) play(current);
+  });
   audio.addEventListener("loadedmetadata", () => applyPitch(current));
   audio.addEventListener("playing", () => {
     applyPitch(current);
     startWave();
   });
-  audio.addEventListener("pause", () => stopWave());
-  audio.addEventListener("ended", () => stop());
-  wave.addEventListener("click", (event) => {
-    if (!audio.duration) return;
-    const rect = wave.getBoundingClientRect();
-    audio.currentTime = ((event.clientX - rect.left) / rect.width) * audio.duration;
-    placePlayhead();
+  audio.addEventListener("pause", () => {
+    if (linkedOn) return;
+    stopWave();
+  });
+  audio.addEventListener("ended", () => {
+    if (linkedOn) return;
+    stop();
   });
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(() => {
@@ -1100,8 +1813,8 @@ function bind() {
     if (event.code === "Space") {
       event.preventDefault();
       if (!current || event.repeat) return;
-      if (audio.paused) play(current);
-      else stop();
+      if (isPlaying()) stop();
+      else play(current);
     }
     if (event.code === "ArrowDown" || event.code === "ArrowUp") {
       event.preventDefault();

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from hoarder.livebpm import tempo_ratio
@@ -21,12 +22,19 @@ _CACHE_MAX = 6
 
 
 def match_sample(
-    path: Path, semitones: int, project_bpm: float | None, sample_bpm: float | None
+    path: Path,
+    semitones: int,
+    project_bpm: float | None,
+    sample_bpm: float | None,
+    stretch: float = 1.0,
 ) -> bytes | None:
-    """Wav bytes for a pitch and/or tempo change. None means play the file as stored."""
-    tempo = 1.0
+    """Wav bytes for a pitch and/or tempo change. None means play the file as stored.
+
+    stretch is 1, 1/2, or 2 on top of the tempo match.
+    """
+    tempo = stretch
     if project_bpm and sample_bpm:
-        tempo = tempo_ratio(sample_bpm, project_bpm)
+        tempo = tempo_ratio(sample_bpm, project_bpm) * stretch
     if semitones == 0 and abs(tempo - 1) < 0.005:
         return None
     return _cached(path, semitones, tempo)
@@ -62,7 +70,13 @@ def _render(path: Path, semitones: int, tempo: float) -> bytes:
         args += ["-af", f"rubberband=tempo={tempo:.6f}:pitch={pitch:.6f}"]
     # 24-bit so a 24-bit source keeps its depth.
     args += ["-f", "wav", "-acodec", "pcm_s24le", "pipe:1"]
-    proc = subprocess.run(args, capture_output=True, timeout=45, check=False)
+    proc = subprocess.run(
+        args,
+        capture_output=True,
+        timeout=45,
+        check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
     if proc.returncode != 0 or not proc.stdout.startswith(b"RIFF"):
         detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         message = detail[-1] if detail else "couldn't render the sample"

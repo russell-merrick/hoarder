@@ -11,11 +11,17 @@ from hoarder import genres as genre_rules
 from hoarder import keys as key_rules
 from hoarder import livebpm as bpm_rules
 from hoarder import roles as role_rules
+from hoarder.genres import GENRE_ORDER
 from hoarder.genres import classify as classify_genres
+from hoarder.genres import decode as decode_genres
+from hoarder.genres import encode as encode_genres
 from hoarder.genres import known_genres
 from hoarder.keys import parse_key, spellings
 from hoarder.livebpm import parse_bpm
+from hoarder.roles import ROLE_ORDER
 from hoarder.roles import classify as classify_roles
+from hoarder.roles import decode as decode_roles
+from hoarder.roles import encode as encode_roles
 from hoarder.roles import known_roles
 
 SCHEMA = """
@@ -35,6 +41,10 @@ CREATE TABLE IF NOT EXISTS samples (
   bit_depth INTEGER,
   roles TEXT NOT NULL DEFAULT '',
   genres TEXT NOT NULL DEFAULT '',
+  role_add TEXT NOT NULL DEFAULT '',
+  role_remove TEXT NOT NULL DEFAULT '',
+  genre_add TEXT NOT NULL DEFAULT '',
+  genre_remove TEXT NOT NULL DEFAULT '',
   musical_key TEXT NOT NULL DEFAULT '',
   bpm REAL,
   dupe INTEGER NOT NULL DEFAULT 0
@@ -114,6 +124,9 @@ def init_db(db_path: Path) -> None:
             conn.execute("ALTER TABLE samples ADD COLUMN bpm REAL")
         if "dupe" not in cols:
             conn.execute("ALTER TABLE samples ADD COLUMN dupe INTEGER NOT NULL DEFAULT 0")
+        for column in ("role_add", "role_remove", "genre_add", "genre_remove"):
+            if column not in cols:
+                conn.execute(f"ALTER TABLE samples ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         conn.executescript(LATE_INDEXES)
         conn.commit()
     finally:
@@ -263,6 +276,46 @@ def delete_missing(conn: sqlite3.Connection, root_id: str, seen: set[str]) -> No
     conn.commit()
 
 
+def visible_ids(guessed: str, added: str, removed: str, decode, order: tuple[str, ...]) -> list[str]:
+    """Guessed tags, plus anything added by hand, minus anything removed by hand."""
+    have = set(decode(guessed))
+    have.difference_update(decode(removed or ""))
+    have.update(decode(added or ""))
+    return [item for item in order if item in have]
+
+
+def set_sample_tags(
+    conn: sqlite3.Connection,
+    sample_id: int,
+    roles: list[str],
+    genres: list[str],
+) -> dict[str, list[str]] | None:
+    """Store the tags the user wants. The guessed columns stay untouched."""
+    row = get_sample(conn, sample_id)
+    if row is None:
+        return None
+    wanted_roles = [role for role in ROLE_ORDER if role in set(roles)]
+    wanted_genres = [genre for genre in GENRE_ORDER if genre in set(genres)]
+    role_add, role_remove = _overlay(decode_roles(row["roles"]), wanted_roles, encode_roles)
+    genre_add, genre_remove = _overlay(decode_genres(row["genres"]), wanted_genres, encode_genres)
+    conn.execute(
+        """
+        UPDATE samples
+        SET role_add = ?, role_remove = ?, genre_add = ?, genre_remove = ?
+        WHERE id = ?
+        """,
+        (role_add, role_remove, genre_add, genre_remove, sample_id),
+    )
+    conn.commit()
+    return {"roles": wanted_roles, "genres": wanted_genres}
+
+
+def _overlay(guessed: list[str], wanted: list[str], encode) -> tuple[str, str]:
+    guess = set(guessed)
+    want = set(wanted)
+    return encode(want - guess), encode(guess - want)
+
+
 def get_sample(conn: sqlite3.Connection, sample_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM samples WHERE id = ?", (sample_id,)).fetchone()
 
@@ -306,7 +359,8 @@ def query_samples(
     rows = conn.execute(
         f"""
         SELECT id, name, ext, root, pack, folder, path, size, duration,
-               sample_rate, channels, bit_depth, roles, genres, musical_key, bpm
+               sample_rate, channels, bit_depth, roles, genres,
+               role_add, role_remove, genre_add, genre_remove, musical_key, bpm
         FROM samples
         WHERE {where}
         ORDER BY {order}
@@ -366,15 +420,20 @@ def _where(
         clauses.append(f"musical_key IN ({','.join('?' for _ in names)})")
         params.extend(names)
     for role in known_roles(roles):
-        clauses.append("roles LIKE ?")
-        params.append(f"% {role} %")
+        clauses.append(_carries("roles", "role_add", "role_remove"))
+        params.extend([f"% {role} %", f"% {role} %", f"% {role} %"])
     for genre in known_genres(genres):
-        clauses.append("genres LIKE ?")
-        params.append(f"% {genre} %")
+        clauses.append(_carries("genres", "genre_add", "genre_remove"))
+        params.extend([f"% {genre} %", f"% {genre} %", f"% {genre} %"])
     for genre in known_genres(exclude_genres):
-        clauses.append("genres NOT LIKE ?")
-        params.append(f"% {genre} %")
+        clauses.append(f"NOT {_carries('genres', 'genre_add', 'genre_remove')}")
+        params.extend([f"% {genre} %", f"% {genre} %", f"% {genre} %"])
     return " AND ".join(clauses), params
+
+
+def _carries(guessed: str, added: str, removed: str) -> str:
+    """True when a tag is guessed and not removed, or added by hand."""
+    return f"(({guessed} LIKE ? AND {removed} NOT LIKE ?) OR {added} LIKE ?)"
 
 
 def _like(text: str) -> str:

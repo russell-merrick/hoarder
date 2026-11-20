@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
+import sys
+import tempfile
+import uuid
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -10,10 +15,28 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-from hoarder.db import backfill_roles, connect, counts_by_root, get_sample, init_db, query_samples, row_dict
+from hoarder.clipboard import copy_file
+from hoarder.dragdrop import drag_file
+from hoarder.db import (
+    backfill_roles,
+    connect,
+    counts_by_root,
+    get_sample,
+    init_db,
+    query_samples,
+    row_dict,
+    set_sample_tags,
+    visible_ids,
+)
+from hoarder.genres import GENRE_ORDER
+from hoarder.genres import GENRE_SET
 from hoarder.genres import decode as decode_genres
+from hoarder.link import REPEATS, STRETCHES, LinkDown, LinkServer, compose_preview, empty_snapshot, repeat_seconds
 from hoarder.livebpm import project_status
+from hoarder.roles import ROLE_ORDER
+from hoarder.roles import ROLE_SET
 from hoarder.roles import decode as decode_roles
 from hoarder.stretch import browser_wav, match_sample
 from hoarder.roots import Root, is_under_root, load_roots
@@ -21,6 +44,19 @@ from hoarder.scan import start_scan, state
 
 STATIC = Path(__file__).resolve().parent / "static"
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "library.db"
+
+def reveal_command(path: Path) -> str | list[str]:
+    """Command that shows this file in the system file manager."""
+    if sys.platform == "darwin":
+        return ["open", "-R", str(path)]
+    # Quote only the path. Quoting "/select,path" as one token makes Explorer
+    # ignore the switch and open Documents whenever the path has a space.
+    return f'explorer.exe /select,"{path}"'
+
+
+def reveal_file(path: Path) -> None:
+    subprocess.Popen(reveal_command(path))
+
 
 MIME = {
     ".wav": "audio/wav",
@@ -41,6 +77,7 @@ def create_app(
     roots: tuple[Root, ...] | list[Root] | None = None,
     *,
     scan_on_start: bool = True,
+    link_port: int | None = None,
 ) -> FastAPI:
     database = Path(db_path) if db_path is not None else DEFAULT_DB
     library_roots = tuple(roots) if roots is not None else load_roots()
@@ -49,9 +86,18 @@ def create_app(
     async def lifespan(_app: FastAPI):
         init_db(database)
         backfill_roles(database)
+        link = None
+        if link_port is not None:
+            link = LinkServer(port=link_port)
+            await link.start()
+            _app.state.link = link
         if scan_on_start:
             start_scan(database, library_roots)
-        yield
+        try:
+            yield
+        finally:
+            if link is not None:
+                await link.stop()
 
     app = FastAPI(title="hoarder", lifespan=lifespan)
     app.state.db_path = database
@@ -162,11 +208,7 @@ def create_app(
             conn.close()
         items = []
         for row in rows:
-            item = row_dict(row)
-            item["roles"] = decode_roles(item.get("roles"))
-            item["genres"] = decode_genres(item.get("genres"))
-            item["key"] = item.pop("musical_key", None) or ""
-            items.append(item)
+            items.append(_public_sample(row_dict(row)))
         return {
             "total": total,
             "offset": offset,
@@ -175,8 +217,79 @@ def create_app(
         }
 
     @app.get("/api/project")
-    def project() -> dict:
-        return project_status()
+    def project(request: Request) -> dict:
+        status = dict(project_status())
+        link = getattr(request.app.state, "link", None)
+        snap = link.snapshot() if link is not None else empty_snapshot()
+        status["link"] = snap
+        if snap["connected"] and snap["bpm"]:
+            status["running"] = True
+            status["bpm"] = snap["bpm"]
+            status["name"] = snap["host"] or status["name"]
+        return status
+
+    @app.get("/api/link")
+    def link_status(request: Request) -> dict:
+        link = getattr(request.app.state, "link", None)
+        if link is None:
+            return empty_snapshot()
+        return link.snapshot()
+
+    @app.post("/api/link/arm")
+    async def link_arm(request: Request, body: LinkArm) -> dict:
+        link = _link(request)
+        try:
+            if body.on:
+                await link.arm()
+            else:
+                await link.disarm()
+        except LinkDown as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return link.snapshot()
+
+    @app.post("/api/link/stop")
+    async def link_stop(request: Request) -> dict:
+        link = _link(request)
+        try:
+            await link.stop_preview()
+        except LinkDown as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/link/preview")
+    async def link_preview(request: Request, body: LinkPreview) -> dict:
+        link = _link(request)
+        if body.stretch not in {0.5, 1, 2}:
+            raise HTTPException(400, "stretch must be 0.5, 1, or 2")
+        snap = link.snapshot()
+        if not snap["connected"] or not snap["armed"]:
+            raise HTTPException(409, "link is off")
+        row, path = _load(request, body.id)
+        try:
+            message = await asyncio.to_thread(
+                compose_preview,
+                path,
+                semitones=body.semitones,
+                project_bpm=body.bpm,
+                sample_bpm=row["bpm"],
+                duration=row["duration"],
+                loop=_loops(row),
+                stretch=float(body.stretch),
+                repeat=body.repeat,
+            )
+            await link.publish_preview(message)
+        except LinkDown as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "ok": True,
+            "path": message["path"],
+            "loop": message["loop"],
+            "beats": message["beats"],
+            "bpm": message.get("bpm"),
+            "repeat": message.get("repeat"),
+        }
 
     @app.get("/api/samples/{sample_id}/file")
     def sample_file(
@@ -204,10 +317,46 @@ def create_app(
     @app.post("/api/samples/{sample_id}/reveal")
     def reveal_sample(sample_id: int, request: Request) -> dict:
         _row, path = _load(request, sample_id)
-        # Quote only the path. Quoting "/select,path" as one token makes Explorer
-        # ignore the switch and open Documents whenever the path has a space.
-        subprocess.Popen(f'explorer.exe /select,"{path}"')
+        reveal_file(path)
         return {"ok": True}
+
+    @app.post("/api/samples/{sample_id}/tags")
+    def sample_tags(sample_id: int, request: Request, body: SampleTags) -> dict:
+        _known_tags(body.roles, ROLE_SET)
+        _known_tags(body.genres, GENRE_SET)
+        conn = connect(request.app.state.db_path)
+        try:
+            saved = set_sample_tags(conn, sample_id, body.roles, body.genres)
+        finally:
+            conn.close()
+        if saved is None:
+            raise HTTPException(404, "sample not in the catalog")
+        return saved
+
+    @app.post("/api/samples/{sample_id}/copy")
+    async def copy_sample(sample_id: int, request: Request, body: SampleCopy) -> dict:
+        try:
+            dest = await asyncio.to_thread(_export_sample, request, sample_id, body)
+        except ValueError as exc:
+            raise HTTPException(415, str(exc)) from exc
+        try:
+            await asyncio.to_thread(copy_file, dest)
+        except OSError as exc:
+            code = 501 if sys.platform != "win32" else 500
+            raise HTTPException(code, "couldn't put the file on the clipboard") from exc
+        return {"ok": True, "path": str(dest), "name": dest.name}
+
+    @app.post("/api/samples/{sample_id}/drag")
+    async def drag_sample(sample_id: int, request: Request, body: SampleCopy) -> dict:
+        if sys.platform != "win32":
+            raise HTTPException(501, "file drag is only available on Windows")
+        try:
+            dest, effect = await asyncio.to_thread(_drag_sample, request, sample_id, body)
+        except ValueError as exc:
+            raise HTTPException(415, str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(500, "couldn't drag the file") from exc
+        return {"ok": True, "path": str(dest), "name": dest.name, "effect": effect}
 
     @app.get("/api/samples/{sample_id}/preview")
     def sample_preview(
@@ -262,6 +411,103 @@ def _matched_name(path: Path, semitones: int, bpm: float | None, sample_bpm: flo
     return f"{' '.join(bits)}.wav"
 
 
+_REPEAT_NAME = {
+    "1/16": "16th",
+    "1/8": "8th",
+    "1/4": "quarter",
+    "1/2": "half-note",
+    "1bar": "1bar",
+    "2bar": "2bar",
+    "4bar": "4bar",
+}
+
+
+def _copy_name(
+    path: Path,
+    semitones: int,
+    bpm: float | None,
+    sample_bpm: float | None,
+    stretch: float,
+    repeat: str | None = None,
+) -> str:
+    stem = _matched_name(path, semitones, bpm, sample_bpm)[:-4]
+    label = _REPEAT_NAME.get(repeat or "")
+    if label:
+        stem = f"{stem} {label}"
+    if stretch == 0.5:
+        stem = f"{stem} half"
+    elif stretch == 2:
+        stem = f"{stem} 2x"
+    cleaned = "".join(ch if ch not in '<>:"/\\|?*' else " " for ch in stem)
+    cleaned = " ".join(cleaned.split())[:80] or "sample"
+    return f"{cleaned}.wav"
+
+
+def _trim_wav(path: Path, seconds: float) -> Path:
+    """A new wav of the first `seconds`, or the same path when it is already shorter."""
+    with wave.open(str(path), "rb") as src:
+        rate = src.getframerate() or 1
+        frames = src.getnframes()
+        keep = max(1, int(round(seconds * rate)))
+        if keep >= frames:
+            return path
+        channels = src.getnchannels()
+        width = src.getsampwidth()
+        rate = src.getframerate() or 1
+        data = src.readframes(keep)
+    directory = Path(tempfile.gettempdir()) / "hoarder-link"
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = directory / f"{uuid.uuid4().hex}.wav"
+    with wave.open(str(dest), "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(width)
+        out.setframerate(rate)
+        out.writeframes(data)
+    return dest
+
+
+def _export_sample(request: Request, sample_id: int, body: SampleCopy) -> Path:
+    if body.stretch not in STRETCHES:
+        raise HTTPException(400, "stretch must be 0.5, 1, or 2")
+    repeat = body.repeat or None
+    if repeat is not None and repeat not in REPEATS:
+        raise HTTPException(400, "unknown repeat rate")
+    row, source = _load(request, sample_id)
+    message = compose_preview(
+        source,
+        semitones=body.semitones,
+        project_bpm=body.bpm,
+        sample_bpm=row["bpm"],
+        duration=row["duration"],
+        loop=False,
+        stretch=float(body.stretch),
+        repeat=repeat,
+    )
+    rendered = Path(message["path"])
+    seconds = repeat_seconds(repeat, message.get("bpm"), body.meter)
+    if seconds:
+        rendered = _trim_wav(rendered, seconds)
+    name = _copy_name(source, body.semitones, body.bpm, row["bpm"], float(body.stretch), repeat)
+    return _place_copy(rendered, source, name)
+
+
+def _drag_sample(request: Request, sample_id: int, body: SampleCopy) -> tuple[Path, int]:
+    dest = _export_sample(request, sample_id, body)
+    return dest, drag_file(dest)
+
+
+def _place_copy(rendered: Path, source: Path, name: str) -> Path:
+    """Keep an unmodified sample where it is. A render gets a readable temp name."""
+    if rendered.resolve() == source.resolve():
+        return source
+    directory = Path(tempfile.gettempdir()) / "hoarder-link"
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = directory / name
+    if dest.resolve() != rendered.resolve():
+        dest.write_bytes(rendered.read_bytes())
+    return dest
+
+
 def _disposition(filename: str) -> str:
     """Content-Disposition for any filename. A plain header can't carry "–" or
     non-Latin text, so those go in the UTF-8 form, as FileResponse does."""
@@ -269,6 +515,81 @@ def _disposition(filename: str) -> str:
     if encoded == filename:
         return f'inline; filename="{filename}"'
     return f"inline; filename*=utf-8''{encoded}"
+
+
+class LinkArm(BaseModel):
+    on: bool
+
+
+class LinkPreview(BaseModel):
+    id: int
+    semitones: int = Field(0, ge=-12, le=12)
+    bpm: float | None = Field(None, ge=1, le=999)
+    stretch: float = 1
+    repeat: str | None = None
+
+
+class SampleTags(BaseModel):
+    roles: list[str] = []
+    genres: list[str] = []
+
+
+class SampleCopy(BaseModel):
+    semitones: int = Field(0, ge=-12, le=12)
+    bpm: float | None = Field(None, ge=1, le=999)
+    stretch: float = 1
+    repeat: str | None = None
+    meter: int = Field(4, ge=1, le=32)
+
+
+def _link(request: Request) -> LinkServer:
+    link = getattr(request.app.state, "link", None)
+    if link is None:
+        raise HTTPException(503, "link is not running")
+    return link
+
+
+def _public_sample(item: dict) -> dict:
+    """Tags the row shows: the guess, plus additions, minus removals."""
+    item["roles"] = visible_ids(
+        item.get("roles") or "",
+        item.get("role_add") or "",
+        item.get("role_remove") or "",
+        decode_roles,
+        ROLE_ORDER,
+    )
+    item["genres"] = visible_ids(
+        item.get("genres") or "",
+        item.get("genre_add") or "",
+        item.get("genre_remove") or "",
+        decode_genres,
+        GENRE_ORDER,
+    )
+    for column in ("role_add", "role_remove", "genre_add", "genre_remove"):
+        item.pop(column, None)
+    item["key"] = item.pop("musical_key", None) or ""
+    return item
+
+
+def _loops(row: dict) -> bool:
+    return "loop" in visible_ids(
+        row.get("roles") or "",
+        row.get("role_add") or "",
+        row.get("role_remove") or "",
+        decode_roles,
+        ROLE_ORDER,
+    )
+
+
+def _known_tags(raw: list[str], allowed: frozenset[str]) -> list[str]:
+    chosen: list[str] = []
+    for item in raw:
+        tag = str(item).strip().lower()
+        if tag not in allowed:
+            raise HTTPException(400, "unknown tag")
+        if tag not in chosen:
+            chosen.append(tag)
+    return chosen
 
 
 def _load(request: Request, sample_id: int) -> tuple[dict, Path]:
@@ -288,4 +609,4 @@ def _load(request: Request, sample_id: int) -> tuple[dict, Path]:
     return row_dict(row), path
 
 
-app = create_app()
+app = create_app(link_port=8771)

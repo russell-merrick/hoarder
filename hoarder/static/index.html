@@ -4,13 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>hoarder</title>
+  <link rel="icon" href="/static/favicon.ico?v=1" sizes="any" />
+  <link rel="icon" type="image/png" href="/static/favicon.png?v=1" />
   <script>
     try {
       var theme = localStorage.getItem("hoarder-theme");
       if (theme) document.documentElement.dataset.theme = theme;
+      var fontScale = Number(localStorage.getItem("hoarder-font-scale"));
+      if (fontScale >= 0.8 && fontScale <= 1.6) {
+        document.documentElement.style.setProperty("--font-scale", String(Math.round(fontScale * 10) / 10));
+      }
     } catch (err) {}
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=22" />
+  <link rel="stylesheet" href="/static/styles.css?v=35" />
 </head>
 <body>
   <div class="app">
@@ -23,15 +29,25 @@
       <div class="topbar-actions">
         <p class="counts" id="counts">—</p>
         <div class="icon-row">
+          <button type="button" class="icon-btn link-btn" id="link" aria-label="Link" title="No plugin connected" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M9 12a4 4 0 0 1 4-4h3a4 4 0 0 1 0 8h-1"/>
+              <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M15 12a4 4 0 0 1-4 4H8a4 4 0 0 1 0-8h1"/>
+            </svg>
+          </button>
           <div class="menu">
             <button type="button" class="icon-btn" id="help" aria-label="Help" aria-expanded="false" aria-controls="help-menu">?</button>
             <div class="menu-panel help-panel" id="help-menu" hidden>
+              <p class="help-lead">support me, check out my <a href="https://open.spotify.com/artist/4AdPUZ8ebuKxvWg0TxDALA" target="_blank" rel="noopener noreferrer">Spotify</a></p>
+              <p class="help-lead">contribute on <a href="https://github.com/russell-merrick/hoarder" target="_blank" rel="noopener noreferrer">github</a></p>
               <ul class="help-list">
-                <li>Click a genre twice to exclude it. Kick, then Dubstep again, leaves dubstep out. A third click clears it. Several tags at once mean all of them.</li>
+                <li>Open Genre and check the ones you want. Several at once mean all of them. A tag on a row does the same check.</li>
+                <li>The + on a row adds or removes that sample's tags. A rescan keeps those edits.</li>
                 <li>Search matches words in the name, folder, or pack, in any order.</li>
                 <li>Space plays and pauses. Up and down move through the list. / focuses search.</li>
                 <li>To key changes pitch only. A relative key already fits, so an A minor loop in C major does not move. An open Ableton set also matches loop tempo.</li>
-                <li>Drag a row into Ableton. The file stays where it is. Right-click a row to open it in Explorer.</li>
+                <li>Drag a row into Ableton. The file stays where it is. Right-click a row to open it in Explorer, or to copy the pitched and tempo-matched wav.</li>
+                <li>The link mark turns green when the plugin is connected. While it is on, a drag passes the original file. Repeat retriggers a one-shot on the grid.</li>
                 <li>BPM and key are read from the filename.</li>
               </ul>
             </div>
@@ -52,6 +68,14 @@
                 <option value="rainbow">Rainbow</option>
               </select>
             </label>
+            <div class="field font-size">
+              <span>Font size</span>
+              <div class="font-size-ctrl">
+                <button type="button" id="font-down" aria-label="Smaller font">−</button>
+                <output id="font-size-label">100%</output>
+                <button type="button" id="font-up" aria-label="Larger font">+</button>
+              </div>
+            </div>
             <label class="check">
               <input type="checkbox" id="hide-dupes" checked />
               Hide duplicates
@@ -69,77 +93,39 @@
           <span>Search</span>
           <input id="q" type="search" placeholder="name or folder" autocomplete="off" />
         </label>
+        <div class="menu genre-menu">
+          <span>Genre</span>
+          <button type="button" class="btn ghost" id="genre-btn" aria-expanded="false" aria-controls="genre-panel">Any</button>
+          <div class="menu-panel" id="genre-panel" hidden></div>
+        </div>
       </div>
       <div class="tag-row">
         <span class="tag-label">Sample</span>
         <div class="sounds" id="roles" role="group" aria-label="Sample type"></div>
       </div>
-      <div class="tag-row">
-        <span class="tag-label">Genre</span>
-        <div class="sounds" id="genres" role="group" aria-label="Genre"></div>
-      </div>
       <div class="tag-row length">
         <span class="tag-label">Length</span>
-        <div class="range">
+        <div class="range" id="length-range">
           <div class="range-track"></div>
           <div class="range-fill" id="length-fill"></div>
           <input id="len-min" type="range" min="0" max="1000" step="1" value="0" aria-label="Minimum length" />
           <input id="len-max" type="range" min="0" max="1000" step="1" value="1000" aria-label="Maximum length" />
         </div>
         <output id="length-label">Any length</output>
-        <label class="field key-field">
-          <span>To key</span>
-          <select id="target-key" aria-label="Pitch to key">
-            <option value="">Original</option>
-          </select>
-        </label>
-        <span id="project-bpm" class="project-bpm" hidden></span>
-      </div>
-      <div class="tag-row length">
         <span class="tag-label">Tempo</span>
-        <label class="field bpm-field">
-          <span>BPM from</span>
-          <input id="bpm-min" type="number" min="40" max="250" step="1" placeholder="any" />
-        </label>
-        <label class="field bpm-field">
-          <span>to</span>
-          <input id="bpm-max" type="number" min="40" max="250" step="1" placeholder="any" />
-        </label>
-        <label class="field key-field">
-          <span>Key</span>
-          <select id="key-filter" aria-label="Only samples in this key">
-            <option value="">Any</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>Sort</span>
-          <select id="sort">
-            <option value="name:asc">Name A–Z</option>
-            <option value="name:desc">Name Z–A</option>
-            <option value="bpm:asc">BPM, low first</option>
-            <option value="bpm:desc">BPM, high first</option>
-            <option value="key:asc">Key, C first</option>
-            <option value="key:desc">Key, B first</option>
-            <option value="duration:asc">Shortest</option>
-            <option value="duration:desc">Longest</option>
-            <option value="pack:asc">Pack</option>
-          </select>
-        </label>
-      </div>
-    </section>
-
-    <section class="panel player" aria-label="Preview">
-      <div class="player-head">
-        <button type="button" class="btn primary" id="play" disabled>Play</button>
-        <div class="player-meta">
-          <strong id="now-name">No sample selected</strong>
-          <span class="dim" id="now-path"></span>
+        <div class="range" id="tempo-range">
+          <div class="range-track"></div>
+          <div class="range-fill" id="tempo-fill"></div>
+          <input id="bpm-min" type="range" min="40" max="250" step="1" value="40" aria-label="Minimum tempo" />
+          <input id="bpm-max" type="range" min="40" max="250" step="1" value="250" aria-label="Maximum tempo" />
         </div>
-        <span class="dur" id="now-time">0:00</span>
-      </div>
-      <div class="wave-wrap">
-        <canvas id="wave" class="wave" height="72" aria-label="Waveform"></canvas>
-        <div id="playhead" class="playhead" hidden></div>
+        <output id="tempo-label">Any tempo</output>
+        <input id="tempo-exact" class="tempo-exact" type="number" inputmode="numeric" min="40" max="250" step="1" placeholder="Exact" aria-label="Exact tempo" />
+        <span class="tag-label key-label">Key</span>
+        <select id="key-filter" class="key-select" aria-label="Only samples in this key">
+          <option value="">Any</option>
+        </select>
+        <span id="project-bpm" class="project-bpm" hidden></span>
       </div>
     </section>
 
@@ -163,11 +149,56 @@
         </li>
       </ul>
     </section>
+
+    <section class="panel player" aria-label="Preview">
+      <div class="player-head">
+        <button type="button" class="btn primary" id="play" disabled>Play</button>
+        <div class="player-meta">
+          <strong id="now-name">No sample selected</strong>
+          <span class="dim" id="now-path"></span>
+        </div>
+        <span class="dur" id="now-time">0:00</span>
+        <label class="field key-field">
+          <span>Repeat</span>
+          <select id="repeat" aria-label="Repeat">
+            <option value="" selected>Off</option>
+            <option value="1/16">1/16</option>
+            <option value="1/8">1/8</option>
+            <option value="1/4">1/4</option>
+            <option value="1/2">1/2</option>
+            <option value="1bar">1 bar</option>
+            <option value="2bar">2 bars</option>
+            <option value="4bar">4 bars</option>
+          </select>
+        </label>
+        <label class="field key-field">
+          <span>To key</span>
+          <select id="target-key" aria-label="Pitch to key">
+            <option value="">Original</option>
+          </select>
+        </label>
+      </div>
+      <div class="wave-wrap">
+        <canvas id="wave" class="wave" height="72" aria-label="Waveform"></canvas>
+        <div id="playhead" class="playhead" hidden></div>
+      </div>
+    </section>
+  </div>
+  <div id="tag-editor" class="tag-editor" hidden>
+    <div class="tag-editor-col">
+      <span>Sample</span>
+      <div id="tag-editor-roles"></div>
+    </div>
+    <div class="tag-editor-col">
+      <span>Genre</span>
+      <div id="tag-editor-genres"></div>
+    </div>
   </div>
   <div id="file-menu" class="file-menu" hidden>
     <button type="button" id="open-explorer">Open in Explorer</button>
+    <button type="button" id="copy-modified">Copy modified</button>
   </div>
   <audio id="audio" preload="auto"></audio>
-  <script src="/static/app.js?v=25"></script>
+  <script src="/static/app.js?v=39"></script>
 </body>
 </html>

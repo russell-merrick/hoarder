@@ -1,0 +1,86 @@
+#!/bin/bash
+# Start Hoarder if it is not already up, then open it in an app window.
+set -u
+
+root="$(cd "$(dirname "$0")/../../.." && pwd)"
+url="http://127.0.0.1:8770"
+log="$HOME/Library/Logs/Hoarder/launch.log"
+profile="$HOME/Library/Application Support/Hoarder/browser"
+
+say() {
+  osascript - "$1" <<'EOF' >/dev/null 2>&1 || true
+on run argv
+  display dialog (item 1 of argv) with title "Hoarder" buttons {"OK"} default button 1 with icon caution
+end run
+EOF
+}
+
+up() {
+  curl -sf --max-time 0.4 "$url/api/status" >/dev/null 2>&1
+}
+
+if ! up; then
+  python=""
+  if command -v python3 >/dev/null 2>&1; then
+    python="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    python="$(command -v python)"
+  else
+    say "Python was not found, so Hoarder could not start."
+    exit 1
+  fi
+  mkdir -p "$(dirname "$log")"
+  : >"$log"
+  cd "$root" || exit 1
+  # nohup ignores the hangup sent when this launcher exits.
+  nohup "$python" -m hoarder >>"$log" 2>&1 &
+  disown >/dev/null 2>&1 || true
+  deadline=$((SECONDS + 25))
+  while (( SECONDS < deadline )); do
+    if up; then
+      break
+    fi
+    sleep 0.25
+  done
+  if ! up; then
+    detail=""
+    if [[ -f "$log" ]]; then
+      detail="$(tail -c 500 "$log" 2>/dev/null || true)"
+    fi
+    say "Hoarder did not start.
+
+$detail"
+    exit 1
+  fi
+fi
+
+browser=""
+for candidate in \
+  "/Applications/Microsoft Edge.app" \
+  "$HOME/Applications/Microsoft Edge.app" \
+  "/Applications/Google Chrome.app" \
+  "$HOME/Applications/Google Chrome.app"
+do
+  if [[ -d "$candidate" ]]; then
+    browser="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$browser" ]]; then
+  open "$url"
+  say "Hoarder is open in your browser. Install Microsoft Edge or Google Chrome for a window without tabs or an address bar."
+  exit 0
+fi
+
+mkdir -p "$profile"
+# The browser stores the last size and position in this profile. A fixed size on every launch would replace it.
+size_args=()
+prefs="$profile/Default/Preferences"
+if [[ ! -f "$prefs" ]] || ! grep -q '"app_window_placement"' "$prefs" 2>/dev/null; then
+  size_args=(--window-size=1280,800)
+fi
+if ! open -na "$browser" --args --app="$url" --user-data-dir="$profile" "${size_args[@]}"; then
+  say "The Hoarder window could not open."
+  exit 1
+fi
