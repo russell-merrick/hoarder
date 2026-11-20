@@ -87,7 +87,7 @@ def test_aiff_preview_does_not_touch_the_file(tmp_path: Path) -> None:
         assert int.from_bytes(frame, "little", signed=True) == 1000 << 8
 
 
-def test_pack_name_skips_downloads_packs_dir(tmp_path: Path) -> None:
+def test_pack_name_skips_packs_dir(tmp_path: Path) -> None:
     root = tmp_path / "Samples"
     file = root / "packs" / "Hard Techno" / "hat.wav"
     file.parent.mkdir(parents=True)
@@ -206,10 +206,10 @@ def test_unique_names_keep_the_organized_copy(tmp_path: Path) -> None:
     try:
         organized = _row("kick.wav", "Hard Techno", 0.4)
         organized["folder"] = r"Hard Techno\Kicks"
-        dump = _row("kick.wav", "downloads", 0.4)
+        dump = _row("kick.wav", "Imported", 0.4)
         dump["root"] = "user_library"
-        dump["folder"] = "downloads"
-        dump["path"] = r"G:\User Library\Samples\downloads\kick.wav"
+        dump["folder"] = "Imported"
+        dump["path"] = r"G:\User Library\Samples\Imported\kick.wav"
         dump["size"] = organized["size"]
         other = _row("other.wav", "Kick", 0.3)
         bigger = _row("kick.wav", "Kick", 0.4)

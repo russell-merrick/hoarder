@@ -1,5 +1,5 @@
 [
   {"id": "curated", "label": "Samples", "path": "D:\\Music\\Samples"},
-  {"id": "downloads", "label": "downloads", "path": "C:\\Users\\you\\Documents\\downloads\\Samples"},
+  {"id": "downloads", "label": "Downloads", "path": "C:\\Users\\you\\Music\\Downloads"},
   {"id": "user_library", "label": "User Library", "path": "C:\\Users\\you\\Documents\\Ableton\\User Library\\Samples"}
 ]

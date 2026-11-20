@@ -185,7 +185,6 @@ def mark_duplicates(conn: sqlite3.Connection) -> None:
             SELECT id, ROW_NUMBER() OVER (
               PARTITION BY name COLLATE NOCASE, size
               ORDER BY
-                CASE WHEN root = 'user_library' AND folder = 'downloads' THEN 1 ELSE 0 END,
                 CASE root WHEN 'downloads' THEN 0 WHEN 'curated' THEN 1 ELSE 2 END,
                 length(folder) DESC,
                 id
