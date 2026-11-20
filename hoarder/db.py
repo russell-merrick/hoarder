@@ -55,6 +55,18 @@ CREATE INDEX IF NOT EXISTS idx_samples_bpm ON samples(bpm);
 CREATE INDEX IF NOT EXISTS idx_samples_key ON samples(musical_key);
 """
 
+# Pitch, then major before minor. The leading musical_key = '' keeps blanks last.
+_KEY_PITCH = """(
+  CASE substr(musical_key, 1, 1)
+    WHEN 'C' THEN 0 WHEN 'D' THEN 2 WHEN 'E' THEN 4 WHEN 'F' THEN 5
+    WHEN 'G' THEN 7 WHEN 'A' THEN 9 WHEN 'B' THEN 11 ELSE 0 END
+  + CASE
+      WHEN instr(musical_key, '#') > 0 THEN 1
+      WHEN instr(musical_key, 'b') > 0 THEN -1
+      ELSE 0 END
+)"""
+_KEY_MINOR = "CASE WHEN musical_key LIKE '%m' THEN 1 ELSE 0 END"
+
 SORTS = {
     ("name", "asc"): "name COLLATE NOCASE ASC",
     ("name", "desc"): "name COLLATE NOCASE DESC",
@@ -66,6 +78,8 @@ SORTS = {
     ("size", "desc"): "size DESC",
     ("bpm", "asc"): "bpm IS NULL, bpm ASC, name COLLATE NOCASE ASC",
     ("bpm", "desc"): "bpm IS NULL, bpm DESC, name COLLATE NOCASE ASC",
+    ("key", "asc"): f"musical_key = '', {_KEY_PITCH} ASC, {_KEY_MINOR} ASC, name COLLATE NOCASE ASC",
+    ("key", "desc"): f"musical_key = '', {_KEY_PITCH} DESC, {_KEY_MINOR} DESC, name COLLATE NOCASE ASC",
 }
 
 TYPE_EXTS = {

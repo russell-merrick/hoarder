@@ -10,7 +10,7 @@
       if (theme) document.documentElement.dataset.theme = theme;
     } catch (err) {}
   </script>
-  <link rel="stylesheet" href="/static/styles.css?v=14" />
+  <link rel="stylesheet" href="/static/styles.css?v=22" />
 </head>
 <body>
   <div class="app">
@@ -18,11 +18,26 @@
       <div class="brand">
         <span class="led" aria-hidden="true"></span>
         <h1>hoarder</h1>
+        <p class="tagline">your samples, organized</p>
       </div>
       <div class="topbar-actions">
         <p class="counts" id="counts">—</p>
-        <div class="menu">
-          <button type="button" class="icon-btn" id="settings" aria-label="Settings" aria-expanded="false">
+        <div class="icon-row">
+          <div class="menu">
+            <button type="button" class="icon-btn" id="help" aria-label="Help" aria-expanded="false" aria-controls="help-menu">?</button>
+            <div class="menu-panel help-panel" id="help-menu" hidden>
+              <ul class="help-list">
+                <li>Click a genre twice to exclude it. Kick, then Dubstep again, leaves dubstep out. A third click clears it. Several tags at once mean all of them.</li>
+                <li>Search matches words in the name, folder, or pack, in any order.</li>
+                <li>Space plays and pauses. Up and down move through the list. / focuses search.</li>
+                <li>To key changes pitch only. A relative key already fits, so an A minor loop in C major does not move. An open Ableton set also matches loop tempo.</li>
+                <li>Drag a row into Ableton. The file stays where it is. Right-click a row to open it in Explorer.</li>
+                <li>BPM and key are read from the filename.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="menu">
+          <button type="button" class="icon-btn" id="settings" aria-label="Settings" aria-expanded="false" aria-controls="settings-menu">
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
               <path fill="currentColor" fill-rule="evenodd" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.2 7.2 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.22-1.13.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.31.6.22l2.39-.96c.5.4 1.04.72 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.22 1.13-.54 1.63-.94l2.39.96c.22.09.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/>
             </svg>
@@ -39,9 +54,10 @@
             </label>
             <label class="check">
               <input type="checkbox" id="hide-dupes" checked />
-              Hide duplicate filenames
+              Hide duplicates
             </label>
             <button type="button" class="btn ghost" id="rescan">Rescan</button>
+          </div>
           </div>
         </div>
       </div>
@@ -102,13 +118,14 @@
             <option value="name:desc">Name Z–A</option>
             <option value="bpm:asc">BPM, low first</option>
             <option value="bpm:desc">BPM, high first</option>
+            <option value="key:asc">Key, C first</option>
+            <option value="key:desc">Key, B first</option>
             <option value="duration:asc">Shortest</option>
             <option value="duration:desc">Longest</option>
             <option value="pack:asc">Pack</option>
           </select>
         </label>
       </div>
-      <p class="hint">Click a genre twice to exclude it. Kick, then Dubstep again, leaves dubstep out. Files stay where they are. Drag a row into Ableton.</p>
     </section>
 
     <section class="panel player" aria-label="Preview">
@@ -131,18 +148,26 @@
         <span id="result-count">—</span>
         <span class="dim" id="scan-note"></span>
       </div>
-      <ul id="hits" class="hits"></ul>
-      <div class="pager" id="pager">
-        <button type="button" class="btn ghost" id="prev" disabled>Prev</button>
-        <span id="page" class="dim"></span>
-        <button type="button" class="btn ghost" id="next" disabled>Next</button>
-      </div>
+      <ul id="hits" class="hits">
+        <li class="hit-head" id="hit-head">
+          <span></span>
+          <button type="button" class="col-sort" data-sort="name">File name<span class="arrow" aria-hidden="true"></span></button>
+          <button type="button" class="col-sort end" data-sort="bpm">BPM<span class="arrow" aria-hidden="true"></span></button>
+          <button type="button" class="col-sort end" data-sort="key">Key<span class="arrow" aria-hidden="true"></span></button>
+          <button type="button" class="col-sort end" data-sort="duration">Time<span class="arrow" aria-hidden="true"></span></button>
+        </li>
+        <li class="pager" id="pager" hidden>
+          <button type="button" class="btn ghost" id="prev" disabled>Prev</button>
+          <span id="page" class="dim"></span>
+          <button type="button" class="btn ghost" id="next" disabled>Next</button>
+        </li>
+      </ul>
     </section>
   </div>
   <div id="file-menu" class="file-menu" hidden>
     <button type="button" id="open-explorer">Open in Explorer</button>
   </div>
   <audio id="audio" preload="auto"></audio>
-  <script src="/static/app.js?v=16"></script>
+  <script src="/static/app.js?v=25"></script>
 </body>
 </html>

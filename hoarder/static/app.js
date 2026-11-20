@@ -210,20 +210,60 @@ function folderText(sample) {
   return folder;
 }
 
+function roleChip(id) {
+  return document.querySelector(`#roles .chip[data-id="${CSS.escape(id)}"]`);
+}
+
+function genreChip(id) {
+  return document.querySelector(`#genres .chip[data-id="${CSS.escape(id)}"]`);
+}
+
+function paintRole(id) {
+  const button = roleChip(id);
+  if (!button) return;
+  const on = selectedRoles.has(id);
+  button.classList.toggle("on", on);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+function toggleRole(id) {
+  if (selectedRoles.has(id)) selectedRoles.delete(id);
+  else selectedRoles.add(id);
+  paintRole(id);
+  offset = 0;
+  refreshList();
+}
+
+function toggleGenreTag(id) {
+  if (genreMode.get(id) === "include") genreMode.delete(id);
+  else genreMode.set(id, "include");
+  const button = genreChip(id);
+  if (button) paintGenre(button, id, GENRE_LABEL[id] || id);
+  offset = 0;
+  refreshList();
+}
+
+function filterTag(id, label, kind) {
+  const tag = document.createElement("button");
+  tag.type = "button";
+  tag.className = kind === "genre" ? "tag genre" : "tag";
+  tag.textContent = label;
+  const on = kind === "genre" ? genreMode.get(id) === "include" : selectedRoles.has(id);
+  tag.classList.toggle("on", on);
+  tag.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (kind === "genre") toggleGenreTag(id);
+    else toggleRole(id);
+  });
+  return tag;
+}
+
 function fillMeta(meta, sample) {
-  const tags = Array.isArray(sample.roles) ? sample.roles : [];
-  for (const id of tags) {
-    const tag = document.createElement("span");
-    tag.className = "tag";
-    tag.textContent = ROLE_LABEL[id] || id;
-    meta.append(tag);
+  for (const id of Array.isArray(sample.roles) ? sample.roles : []) {
+    if (ROLE_LABEL[id]) meta.append(filterTag(id, ROLE_LABEL[id], "role"));
   }
-  const genres = Array.isArray(sample.genres) ? sample.genres : [];
-  for (const id of genres) {
-    const tag = document.createElement("span");
-    tag.className = "tag genre";
-    tag.textContent = GENRE_LABEL[id] || id;
-    meta.append(tag);
+  for (const id of Array.isArray(sample.genres) ? sample.genres : []) {
+    if (GENRE_LABEL[id]) meta.append(filterTag(id, GENRE_LABEL[id], "genre"));
   }
   const rest = folderText(sample);
   if (rest) meta.append(document.createTextNode(rest));
@@ -303,17 +343,51 @@ function paintLength() {
   else label.textContent = `${fmtLen(min)} – ${fmtLen(max)}`;
 }
 
+// The last 5% of the bar is the open end: no minimum, or no maximum.
+const LEN_SNAP = 0.05;
+
+function snapLength(pos) {
+  if (pos <= LEN_MAX * LEN_SNAP) return 0;
+  if (pos >= LEN_MAX * (1 - LEN_SNAP)) return LEN_MAX;
+  return pos;
+}
+
 function onLengthInput(which) {
   const minEl = $("len-min");
   const maxEl = $("len-max");
   let min = Number(minEl.value);
   let max = Number(maxEl.value);
+  if (which === "min") min = snapLength(min);
+  else max = snapLength(max);
+  minEl.value = String(min);
+  maxEl.value = String(max);
   if (max - min < 1) {
     if (which === "min") minEl.value = String(Math.max(0, max - 1));
     else maxEl.value = String(Math.min(LEN_MAX, min + 1));
   }
   paintLength();
   scheduleList();
+}
+
+function lengthPos(event, range) {
+  const rect = range.getBoundingClientRect();
+  const ratio = (event.clientX - rect.left - 6) / Math.max(1, rect.width - 12);
+  return snapLength(Math.round(Math.min(LEN_MAX, Math.max(0, ratio * LEN_MAX))));
+}
+
+function lengthTarget(pos) {
+  const min = Number($("len-min").value);
+  const max = Number($("len-max").value);
+  if (pos <= min) return "min";
+  if (pos >= max) return "max";
+  return pos - min <= max - pos ? "min" : "max";
+}
+
+function setLength(which, pos) {
+  $(which === "min" ? "len-min" : "len-max").value = String(pos);
+  $("len-min").style.zIndex = which === "min" ? "2" : "1";
+  $("len-max").style.zIndex = which === "max" ? "2" : "1";
+  onLengthInput(which);
 }
 
 function renderRoles() {
@@ -326,17 +400,10 @@ function renderRoles() {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "chip";
+      button.dataset.id = id;
       button.textContent = label;
       button.setAttribute("aria-pressed", "false");
-      button.addEventListener("click", () => {
-        if (selectedRoles.has(id)) selectedRoles.delete(id);
-        else selectedRoles.add(id);
-        const on = selectedRoles.has(id);
-        button.classList.toggle("on", on);
-        button.setAttribute("aria-pressed", on ? "true" : "false");
-        offset = 0;
-        refreshList();
-      });
+      button.addEventListener("click", () => toggleRole(id));
       wrap.append(button);
     }
     box.append(wrap);
@@ -361,6 +428,7 @@ function renderGenres() {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "chip genre";
+      button.dataset.id = id;
       paintGenre(button, id, label);
       button.addEventListener("click", () => {
         const mode = genreMode.get(id);
@@ -403,11 +471,8 @@ async function refreshStatus() {
   if (!response.ok) return;
   const body = await response.json();
   scanning = Boolean(body.scanning);
-  const bits = (body.roots || []).map((root) => {
-    const count = (root.count || 0).toLocaleString();
-    return root.online ? `${count} ${root.label.toLowerCase()}` : `${root.label} offline`;
-  });
-  $("counts").textContent = bits.join(" · ") || "—";
+  const total = ($("hide-dupes").checked ? body.active : body.samples) || 0;
+  $("counts").textContent = `${total.toLocaleString()} ${total === 1 ? "sample" : "samples"}`;
   const offline = (body.roots || []).filter((root) => !root.online).map((root) => root.label);
   $("scan-note").textContent = scanning
     ? `Scanning… ${body.seen.toLocaleString()} files`
@@ -435,10 +500,32 @@ async function refreshList() {
   drawList(body);
 }
 
+function paintSortArrows() {
+  const [sort, direction] = $("sort").value.split(":");
+  for (const button of document.querySelectorAll("#hit-head .col-sort")) {
+    const on = button.dataset.sort === sort;
+    const dir = on ? direction : "asc";
+    button.classList.toggle("on", on);
+    button.classList.toggle("up", dir === "asc");
+    button.classList.toggle("down", dir !== "asc");
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+function applySort(sort, direction) {
+  const value = `${sort}:${direction}`;
+  if ($("sort").value === value) return;
+  $("sort").value = value;
+  offset = 0;
+  paintSortArrows();
+  refreshList();
+}
+
 function drawList(body) {
   pageItems = body.items;
   const hits = $("hits");
-  hits.replaceChildren();
+  const pager = $("pager");
+  hits.replaceChildren($("hit-head"));
   if (!body.items.length) {
     const empty = document.createElement("li");
     empty.className = "hit-empty";
@@ -448,6 +535,8 @@ function drawList(body) {
   for (const sample of body.items) {
     hits.appendChild(renderHit(sample));
   }
+  hits.appendChild(pager);
+  hits.scrollTop = 0;
   const pages = Math.max(1, Math.ceil(body.total / PAGE));
   const onePage = pages <= 1;
   const from = body.total ? body.offset + 1 : 0;
@@ -853,6 +942,22 @@ function bind() {
   });
 
   paintLength();
+  const lengthRange = document.querySelector(".length .range");
+  lengthRange.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest("input")) return;
+    const which = lengthTarget(lengthPos(event, lengthRange));
+    const move = (ev) => setLength(which, lengthPos(ev, lengthRange));
+    move(event);
+    lengthRange.setPointerCapture(event.pointerId);
+    const end = () => {
+      lengthRange.removeEventListener("pointermove", move);
+      lengthRange.removeEventListener("pointerup", end);
+      lengthRange.removeEventListener("pointercancel", end);
+    };
+    lengthRange.addEventListener("pointermove", move);
+    lengthRange.addEventListener("pointerup", end);
+    lengthRange.addEventListener("pointercancel", end);
+  });
   for (const id of ["len-min", "len-max"]) {
     const which = id === "len-min" ? "min" : "max";
     $(id).addEventListener("pointerdown", () => {
@@ -871,9 +976,18 @@ function bind() {
   for (const id of ["key-filter", "sort"]) {
     $(id).addEventListener("change", () => {
       offset = 0;
+      if (id === "sort") paintSortArrows();
       refreshList();
     });
   }
+  paintSortArrows();
+  $("hit-head").addEventListener("click", (event) => {
+    const button = event.target.closest(".col-sort");
+    if (!button) return;
+    const [current, direction] = $("sort").value.split(":");
+    const next = current === button.dataset.sort && direction === "asc" ? "desc" : "asc";
+    applySort(button.dataset.sort, next);
+  });
 
   $("target-key").addEventListener("change", () => {
     if (!current) return;
@@ -883,20 +997,36 @@ function bind() {
 
   const settings = $("settings");
   const menu = $("settings-menu");
+  const helpBtn = $("help");
+  const helpMenu = $("help-menu");
+  function setMenu(button, panel, open) {
+    panel.hidden = !open;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+  }
   settings.addEventListener("click", (event) => {
     event.stopPropagation();
     const open = menu.hidden;
-    menu.hidden = !open;
-    settings.setAttribute("aria-expanded", open ? "true" : "false");
+    setMenu(helpBtn, helpMenu, false);
+    setMenu(settings, menu, open);
+  });
+  helpBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const open = helpMenu.hidden;
+    setMenu(settings, menu, false);
+    setMenu(helpBtn, helpMenu, open);
   });
   menu.addEventListener("click", (event) => event.stopPropagation());
+  helpMenu.addEventListener("click", (event) => event.stopPropagation());
   document.addEventListener("click", () => {
-    menu.hidden = true;
-    settings.setAttribute("aria-expanded", "false");
+    setMenu(settings, menu, false);
+    setMenu(helpBtn, helpMenu, false);
     closeFileMenu();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeFileMenu();
+    if (event.key !== "Escape") return;
+    setMenu(settings, menu, false);
+    setMenu(helpBtn, helpMenu, false);
+    closeFileMenu();
   });
   $("hits").addEventListener("scroll", () => closeFileMenu());
   $("open-explorer").addEventListener("click", (event) => {
@@ -910,6 +1040,7 @@ function bind() {
       localStorage.setItem("hoarder-hide-dupes", $("hide-dupes").checked ? "1" : "0");
     } catch (_) {}
     offset = 0;
+    refreshStatus();
     refreshList();
   });
 

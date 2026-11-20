@@ -73,6 +73,7 @@ def create_app(
         conn = connect(database)
         try:
             by_root = counts_by_root(conn)
+            active = conn.execute("SELECT COUNT(*) AS n FROM samples WHERE dupe = 0").fetchone()["n"]
         finally:
             conn.close()
         return {
@@ -83,6 +84,7 @@ def create_app(
             "error": error,
             "offline": offline,
             "samples": sum(by_root.values()),
+            "active": active,
             "by_root": by_root,
             "roots": [
                 {

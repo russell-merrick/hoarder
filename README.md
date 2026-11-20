@@ -20,14 +20,22 @@ List your sample folders in `roots.json` first. Copy `roots.example.json` to `ro
 ## What you can do
 
 - Search by words in the name, folder or pack, in any order. "techno kick" finds kicks in a Hard Techno pack.
-- Filter with sample tags (kick, clap, perc, bass, 808, pad, keys, loop, and so on) and genre tags. Genre chips cycle include, exclude, off. Several tags together mean all of them.
-- Limit by length, BPM and key, and sort by name, BPM, length or pack.
+- Filter with sample tags (kick, clap, perc, bass, 808, pad, keys, loop, and so on) and genre tags. Click a tag under a sample to add that filter. Genre chips cycle include, exclude, off. Several tags together mean all of them.
+- Limit by length, BPM and key, and sort by name, BPM, key, length or pack. The File name, BPM, Key, and Time headings sort too.
 - Preview in the browser. Down and up arrows play the next and previous sample. Space plays and pauses. `/` focuses search.
 - Drag a row into Ableton. The file on disk stays as it is.
 - Transpose to a key without changing the sample's tempo. Pick major or minor. A relative key already fits, so an A minor loop in C major doesn't move. If Ableton has a saved set, loops with a BPM also match that set's tempo.
-- Use the gear for theme, hiding duplicate filenames, and rescan.
+- Use the gear for theme, hiding duplicates, and rescan. A duplicate is the same filename and the same file size. With that on, the count is the samples you can search.
 - Right-click a row and choose Open in Explorer.
 
 Tempo comes from the filename: "125bpm", "125 BPM", or a bare 125 on a loop. Key comes from the filename or folder: "Am", "Amin", "A minor". A lone capital letter on a drum is read as a take letter, not a key.
 
 The catalog is a local SQLite file, `library.db`, created on first run. It is not in this repo, and neither is `roots.json`.
+
+## Future work
+
+Sample tags are still a short list read from the filename and folder. Crash and ride both become Cymbal. Piano, organ, and Rhodes all become Keys.
+
+The catalog's search uses a larger Instrument tag set than the ten links on each family of the instruments page. Keys is its own instrument. Crash and rides sit under cymbals. Bass, fx, fills, chords, leads, pads, and plucks are functional tags. Closed, open, and sub are sonic tags. downloads does not publish a classification API.
+
+Next step is to tag files with that fuller instrument list, and keep functional and sonic tags separate, still from the filename and folder.

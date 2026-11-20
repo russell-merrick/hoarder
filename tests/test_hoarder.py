@@ -212,13 +212,18 @@ def test_unique_names_keep_the_organized_copy(tmp_path: Path) -> None:
         dump["path"] = r"G:\User Library\Samples\downloads\kick.wav"
         dump["size"] = organized["size"]
         other = _row("other.wav", "Kick", 0.3)
-        upsert_many(conn, [organized, dump, other])
+        bigger = _row("kick.wav", "Kick", 0.4)
+        bigger["path"] = r"C:\samples\Kick\kick-big.wav"
+        bigger["size"] = organized["size"] + 500
+        upsert_many(conn, [organized, dump, other, bigger])
         mark_duplicates(conn)
         total, rows = query_samples(conn, unique_names=True)
-        assert total == 2
-        kept = next(row for row in rows if row["name"] == "kick.wav")
-        assert kept["root"] == "curated"
-        assert query_samples(conn, unique_names=False)[0] == 3
+        assert total == 3
+        kept = [row for row in rows if row["name"] == "kick.wav"]
+        assert len(kept) == 2
+        assert any(row["root"] == "curated" and row["size"] == organized["size"] for row in kept)
+        assert any(row["size"] == bigger["size"] for row in kept)
+        assert query_samples(conn, unique_names=False)[0] == 4
     finally:
         conn.close()
 
@@ -527,6 +532,10 @@ def test_bpm_and_key_filters_and_bpm_sort(tmp_path: Path) -> None:
         assert query_samples(conn, key="nonsense")[0] == 4
         _total, rows = query_samples(conn, sort="bpm", direction="desc")
         assert [row["bpm"] for row in rows] == [174, 128, 124, None]
+        _total, rows = query_samples(conn, sort="key", direction="asc")
+        assert [row["musical_key"] for row in rows] == ["Am", "Bbm", "A#m", ""]
+        _total, rows = query_samples(conn, sort="key", direction="desc")
+        assert [row["musical_key"] for row in rows] == ["Bbm", "A#m", "Am", ""]
     finally:
         conn.close()
 
